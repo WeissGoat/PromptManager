@@ -150,7 +150,7 @@ class PromptManagerApp(QMainWindow):
         self.last_selected_node_index = 0
         
         # Preview State
-        self.image_sources = [] # List of folders/paths to look for images
+        self.image_sources = [] # List of dicts: {'name', 'path', 'status': 'valid'|'pending'|'invalid'}
         self.current_source_index = 0
         self.current_image_list = [] # Images in current source
         self.current_image_index = 0
@@ -351,7 +351,7 @@ class PromptManagerApp(QMainWindow):
         # 1. Load Tags
         self.load_tags(real_path)
         
-        # 2. Setup Preview Logic
+        # 2. Setup Preview Logic (Lazy Load)
         self.setup_preview_sources(real_path)
 
     def load_tags(self, folder_path):
@@ -369,59 +369,94 @@ class PromptManagerApp(QMainWindow):
 
     def setup_preview_sources(self, node_path):
         """
-        Scans the node path for:
-        1. Root images (tmp.png etc)
-        2. Subfolders (AI Gen folders)
-        3. Linked subfolders
+        Lazy loading of sources.
+        Does NOT resolve lnk or scan subfolders immediately.
+        Just builds a list of candidates.
         """
         self.image_sources = []
         
-        if not os.path.isdir(node_path):
+        if not os.path.exists(node_path):
             self.update_preview_display()
             return
 
-        # Source 0: The Node Folder itself (Reference images)
-        # Check quickly if reference images exist
+        # 1. Reference Image (Root)
+        # Check immediately as it's the default view and usually fast (no COM)
         if has_images_fast(node_path):
-            self.image_sources.append({"name": "参考图 (Ref)", "path": node_path})
+            self.image_sources.append({
+                "name": "参考图 (Ref)", 
+                "path": node_path, 
+                "status": "valid"
+            })
 
-        # Scan for subfolders (AI Generation folders)
+        # 2. Sub-items (Lazy Load - don't resolve yet)
         try:
-            sub_items = os.listdir(node_path)
-            # Sort sub_items so newest folders might be last, or sort by name
-            sub_items.sort(key=natural_sort_key, reverse=True)
-
-            for item in sub_items:
-                full_path = os.path.join(node_path, item)
-                
-                # Fast check for simple directories first to avoid COM overhead if possible
-                if os.path.isdir(full_path):
-                    real_path = full_path
-                elif item.lower().endswith('.lnk'):
-                    real_path = resolve_path(full_path)
-                else:
-                    continue # Skip non-folders
-                
-                if os.path.isdir(real_path):
-                    # Optimized check using scandir
-                    if has_images_fast(real_path):
-                        self.image_sources.append({"name": item, "path": real_path})
+            entries = []
+            with os.scandir(node_path) as it:
+                for entry in it:
+                    if entry.is_dir() or entry.name.lower().endswith('.lnk'):
+                        entries.append(entry.name)
+            
+            # Sort by name (natural sort)
+            entries.sort(key=natural_sort_key, reverse=True)
+            
+            for name in entries:
+                full_path = os.path.join(node_path, name)
+                self.image_sources.append({
+                    "name": name,
+                    "path": full_path, # Could be .lnk or folder
+                    "status": "pending" # We haven't checked content yet
+                })
         except OSError:
             pass
 
-        # Default selection logic
-        # "If no reference image (source 0 is Ref?), show first AI gen folder"
-        # Since we only added "Ref" to sources if it HAS images, we just check indices.
+        # Initial Load: Try to find the first valid source starting from index 0
+        self.current_source_index = -1
+        self.find_and_load_source(start_index=0, direction=1)
+
+    def find_and_load_source(self, start_index, direction):
+        """
+        Iterates from start_index in direction (+1 or -1) to find a valid source.
+        Resolves pending sources on the fly.
+        """
+        idx = start_index
+        found = False
         
-        # If the first source is the Ref folder (path matches node_path), select it.
-        # Otherwise select the first available source (which would be an AI gen folder).
-        self.current_source_index = 0
-        
-        # If we have sources, load the first one
-        self.load_images_from_source()
+        # Loop until we find a valid source or run out of candidates
+        while 0 <= idx < len(self.image_sources):
+            source = self.image_sources[idx]
+            
+            # Validate if pending
+            if source['status'] == 'pending':
+                # 1. Resolve Path (if lnk)
+                real_path = source['path']
+                if real_path.lower().endswith('.lnk'):
+                    real_path = resolve_path(real_path)
+                
+                # 2. Check if it is a directory and has images
+                if os.path.isdir(real_path) and has_images_fast(real_path):
+                    source['path'] = real_path # Update to resolved path
+                    source['status'] = 'valid'
+                else:
+                    source['status'] = 'invalid'
+            
+            if source['status'] == 'valid':
+                self.current_source_index = idx
+                self.load_images_from_source()
+                found = True
+                break
+            
+            # If invalid, continue to next
+            idx += direction
+
+        if not found:
+            # If we couldn't find anything in that direction
+            # If this was initial load (index -1), show empty state
+            if self.current_source_index == -1:
+                self.current_image_list = []
+                self.update_preview_display()
 
     def load_images_from_source(self):
-        if not self.image_sources:
+        if not self.image_sources or self.current_source_index < 0:
             self.current_image_list = []
             self.update_preview_display()
             return
@@ -430,8 +465,6 @@ class PromptManagerApp(QMainWindow):
         path = source['path']
         
         try:
-            # We still need to list files to navigate them, but listdir is usually fast enough for <5k files.
-            # If this is still slow, we would need pagination, but let's assume listdir is OK.
             files = [f for f in os.listdir(path) if is_image_file(f)]
             files.sort(key=natural_sort_key)
             self.current_image_list = [os.path.join(path, f) for f in files]
@@ -445,34 +478,25 @@ class PromptManagerApp(QMainWindow):
         if not self.current_image_list:
             self.preview_label.setText("无图片")
             self.preview_label.setPixmap(QPixmap()) # Clear
-            source_name = self.image_sources[self.current_source_index]['name'] if self.image_sources else "None"
+            
+            source_name = "None"
+            if 0 <= self.current_source_index < len(self.image_sources):
+                source_name = self.image_sources[self.current_source_index]['name']
+                
             self.source_info_label.setText(f"Folder: {source_name} | No Images")
             return
 
         img_path = self.current_image_list[self.current_image_index]
         
         # OPTIMIZATION: Use QImageReader to load scaled image directly
-        # This prevents decoding full 4K/8K images into memory
         reader = QImageReader(img_path)
-        reader.setAutoTransform(True) # Handle EXIF rotation
+        reader.setAutoTransform(True) 
         
-        # Get original size to calculate aspect ratio
         orig_size = reader.size()
-        
         if not orig_size.isEmpty():
             target_size = self.preview_label.size()
-            
-            # Simple aspect ratio logic to find bounding box
-            # QImageReader.setScaledSize scales the image DURING decode
-            # making it much faster for large files.
-            
-            # We scale to the label size (or slightly larger to avoid pixelation on resize)
-            # Let's just limit the max dimension to the label's max dimension to be safe
-            
             scale_factor = min(target_size.width() / orig_size.width(), 
                                target_size.height() / orig_size.height())
-            
-            # Only downscale, never upscale during read (save memory)
             if scale_factor < 1.0:
                 new_width = int(orig_size.width() * scale_factor)
                 new_height = int(orig_size.height() * scale_factor)
@@ -491,20 +515,14 @@ class PromptManagerApp(QMainWindow):
         self.source_info_label.setText(f"Folder: {source_name} | Img: {img_name} ({self.current_image_index+1}/{len(self.current_image_list)})")
 
     def next_image_source(self):
-        # Left Click: Next folder (No Loop)
-        if len(self.image_sources) <= 1: return
-        
+        # Left Click: Next folder (No Loop, skip invalid)
         if self.current_source_index < len(self.image_sources) - 1:
-            self.current_source_index += 1
-            self.load_images_from_source()
+            self.find_and_load_source(self.current_source_index + 1, 1)
 
     def prev_image_source(self):
-        # Right Click: Previous folder (No Loop)
-        if len(self.image_sources) <= 1: return
-        
+        # Right Click: Previous folder (No Loop, skip invalid)
         if self.current_source_index > 0:
-            self.current_source_index -= 1
-            self.load_images_from_source()
+            self.find_and_load_source(self.current_source_index - 1, -1)
 
     def scroll_image(self, direction):
         # Wheel: Switch images in current folder (No Loop)
@@ -646,6 +664,7 @@ class PromptManagerApp(QMainWindow):
                         self.scene_tree.setCurrentItem(item)
                         self.on_scene_selected(item, 0)
                         break
+                    iterator += 1 # 修复: 必须推进迭代器，否则会卡死在 while 循环中
                 
                 QMessageBox.information(self, "提示", "场景已创建。请从其他场景拖拽动作节点到左侧树状图的该场景上进行组合。")
                 
