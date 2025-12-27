@@ -394,12 +394,19 @@ class PromptManagerApp(QMainWindow):
             with os.scandir(node_path) as it:
                 for entry in it:
                     if entry.is_dir() or entry.name.lower().endswith('.lnk'):
-                        entries.append(entry.name)
+                        # Get creation time to sort by newest first
+                        try:
+                            # On Windows, st_ctime is creation time. 
+                            # On Unix, it's metadata change time (often close enough for new folders)
+                            ctime = entry.stat().st_ctime
+                        except OSError:
+                            ctime = 0
+                        entries.append((ctime, entry.name))
             
-            # Sort by name (natural sort)
-            entries.sort(key=natural_sort_key, reverse=True)
+            # Sort by creation time: Newest first (Reverse)
+            entries.sort(key=lambda x: x[0], reverse=True)
             
-            for name in entries:
+            for _, name in entries:
                 full_path = os.path.join(node_path, name)
                 self.image_sources.append({
                     "name": name,
@@ -683,7 +690,12 @@ class PromptManagerApp(QMainWindow):
             tag_file = os.path.join(path, "tags.txt")
             if os.path.exists(tag_file):
                 with open(tag_file, 'r', encoding='utf-8') as f:
-                    all_tags.append(f"--- {item.text()} ---\n{f.read()}")
+                    content = f.read()
+                    split = "=\n"
+                    if "type,\n" in content:
+                        split = "type,\n"
+                    real_content = content.split(split)[0]
+                    all_tags.append(f"{real_content}")
         
         self.prompt_editor.setText("\n\n".join(all_tags))
 
