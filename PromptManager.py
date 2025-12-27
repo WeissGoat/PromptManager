@@ -4,6 +4,7 @@ import shutil
 import re
 import subprocess
 import glob
+import tempfile
 from pathlib import Path
 
 # PySide6 Imports
@@ -53,6 +54,29 @@ def create_shortcut(target_path, link_path):
     except Exception as e:
         print(f"Error creating shortcut: {e}")
         return False
+
+def reset_ext_node_type(txt, key, param):
+    data = txt.split('\n')
+    need_split = True
+    for i, item in enumerate(data):
+        if item[:len(key)] == key:
+            data[i] = param
+            break
+        if item == "=":
+            need_split = False
+        if i == len(data) - 1:
+            if need_split:
+                data.append("=")
+            data.append(param)
+    return '\n'.join(data)
+
+def reset_ainode_ext_node_type(node_path, key, param):
+    tags_path = os.path.join(node_path, "tags.txt")
+    if not os.path.exists(tags_path):
+        raise FileNotFoundError(f"tags.txt not found in {node_path}")
+    txt = open(tags_path, "r+", encoding="utf-8").read()
+    ntxt = reset_ext_node_type(txt, key, param)
+    open(tags_path, "w", encoding="utf-8").write(ntxt)
 
 def is_image_file(filename):
     return filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp'))
@@ -697,7 +721,31 @@ class PromptManagerApp(QMainWindow):
                     real_content = content.split(split)[0]
                     all_tags.append(f"{real_content}")
         
-        self.prompt_editor.setText("\n\n".join(all_tags))
+        full_content = "\n\n".join(all_tags)
+        self.prompt_editor.setText(full_content)
+        
+        # 创建临时文件并写入内容
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', prefix='batch_export_') as temp_file:
+            temp_file.write(full_content)
+            temp_file_path = temp_file.name
+        
+        # 将临时文件复制到剪贴板，这样可以直接粘贴到其他文件夹
+        clipboard = QApplication.clipboard()
+        clipboard.setMimeData(self.create_mime_data_with_file(temp_file_path))
+        
+        # 显示信息提示用户
+        QMessageBox.information(self, "批量导出", f"内容已导出到临时文件，可直接粘贴到目标文件夹:\n{temp_file_path}")
+    
+    def create_mime_data_with_file(self, file_path):
+        """
+        创建包含文件路径的MIME数据，用于文件拖放和粘贴操作
+        """
+        from PySide6.QtCore import QMimeData
+        mime_data = QMimeData()
+        # 设置文件URL列表
+        urls = [QUrl.fromLocalFile(file_path)]
+        mime_data.setUrls(urls)
+        return mime_data
 
     def batch_edit(self):
         items = self.node_list.selectedItems()
@@ -705,24 +753,31 @@ class PromptManagerApp(QMainWindow):
         
         text, ok = QInputDialog.getMultiLineText(self, "批量追加", "输入要追加的提示词:")
         if ok and text:
+            # key = ','.join(text.split(',')[:2])
+            # value = ','.join(text.split(',')[2:])
+
+            key = f"tag_node,{os.path.basename(self.current_scene_path)}"
+            value = text
             for item in items:
                 path = resolve_path(item.data(Qt.UserRole))
-                tag_file = os.path.join(path, "tags.txt")
+                # tag_file = os.path.join(path, "tags.txt")
                 
-                content = ""
-                if os.path.exists(tag_file):
-                    with open(tag_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
+                # content = ""
+                # if os.path.exists(tag_file):
+                #     with open(tag_file, 'r', encoding='utf-8') as f:
+                #         content = f.read()
                 
-                # Append
-                if content and not content.endswith('\n'):
-                    content += '\n'
-                content += text + "," # Append comma safely?
+                # # Append
+                # if content and not content.endswith('\n'):
+                #     content += '\n'
+                # content += text + "," # Append comma safely?
                 
-                with open(tag_file, 'w', encoding='utf-8') as f:
-                    f.write(content)
-            
-            QMessageBox.information(self, "Success", "批量追加完成")
+                # with open(tag_file, 'w', encoding='utf-8') as f:
+                #     f.write(content)
+
+
+                reset_ainode_ext_node_type(path, key, f"{key},{value}")
+            QMessageBox.information(self, "Success", f"key:{key} item:{value} 编辑成功")
             # Refresh current view if needed
             if self.node_list.currentItem() in items:
                 self.load_tags(resolve_path(self.node_list.currentItem().data(Qt.UserRole)))
