@@ -100,6 +100,16 @@ def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower()
             for text in re.split('([0-9]+)', s)]
 
+def clean_node_name(name):
+    """
+    Removes the ordering prefix from a node name.
+    Supports both old format '(1)Name' and new format '1_Name'.
+    """
+    # Regex matches:
+    # 1. ^\(\d+\) -> Starts with (digits)
+    # 2. ^\d+_    -> Starts with digits_
+    return re.sub(r'^(\(\d+\)|\d+_)', '', name)
+
 # --- Custom Widgets ---
 
 class ClickableImageLabel(QLabel):
@@ -168,10 +178,11 @@ class PromptManagerApp(QMainWindow):
         self.resize(1200, 800)
         
         # State
-        self.root_dir = ""
+        self.root_dir = r"D:\AI\design\动作改2"
         self.current_scene_path = None
         self.current_node_path = None
         self.last_selected_node_index = 0
+        self.bat_script_path = r"C:\Users\WhiteSheep\AppData\Roaming\Microsoft\Windows\SendTo\ct.blackboard.run_next_character.bat" # Store selected bat script path
         
         # Preview State
         self.image_sources = [] # List of dicts: {'name', 'path', 'status': 'valid'|'pending'|'invalid'}
@@ -303,12 +314,14 @@ class PromptManagerApp(QMainWindow):
     # --- Logic: Loading Data ---
 
     def select_root_directory(self):
-        folder = QFileDialog.getExistingDirectory(self, "选择图集根目录")
-        if folder:
-            self.root_dir = folder
-            self.load_scenes()
-        else:
-            sys.exit() # Exit if no folder selected
+        if not self.root_dir:
+            folder = QFileDialog.getExistingDirectory(self, "选择图集根目录")
+            if folder:
+                self.root_dir = folder
+            else:
+                sys.exit() # Exit if no folder selected
+        self.load_scenes()
+        
 
     def load_scenes(self):
         self.scene_tree.clear()
@@ -587,7 +600,8 @@ class PromptManagerApp(QMainWindow):
         if ok and name:
             # Auto numbering based on existing items
             count = self.node_list.count() + 1
-            folder_name = f"({count}){name}"
+            # NEW FORMAT: 1_Name
+            folder_name = f"{count}_{name}" 
             new_path = os.path.join(self.current_scene_path, folder_name)
             
             try:
@@ -607,7 +621,8 @@ class PromptManagerApp(QMainWindow):
     def on_node_reordered(self):
         """
         Called when Drag & Drop reordering happens within the list.
-        Renames folders to match new order: (1)Name, (2)Name...
+        Renames folders to match new order.
+        Supports automatic migration from (1)Name to 1_Name.
         """
         if not self.current_scene_path: return
         
@@ -617,11 +632,11 @@ class PromptManagerApp(QMainWindow):
             old_full_path = item.data(Qt.UserRole)
             old_name = os.path.basename(old_full_path)
             
-            # Extract pure name without (N)
-            # Regex to remove leading (d+)
-            pure_name = re.sub(r'^\(\d+\)', '', old_name)
+            # Extract pure name using helper that supports both formats
+            pure_name = clean_node_name(old_name)
             
-            new_name = f"({i+1}){pure_name}"
+            # NEW FORMAT: i_Name
+            new_name = f"{i+1}_{pure_name}"
             new_full_path = os.path.join(self.current_scene_path, new_name)
             
             if old_full_path != new_full_path:
@@ -655,16 +670,14 @@ class PromptManagerApp(QMainWindow):
             
             # Determine new link name
             name = os.path.basename(source_real_path)
-            # Remove existing numbering if any for the link name, or keep it?
-            # User requirement: "lnk correspond action node"
-            # Let's clean the name for the target to avoid (1)(1)Name
-            pure_name = re.sub(r'^\(\d+\)', '', name)
+            pure_name = clean_node_name(name)
             
             # Determine next number in target scene
             existing = os.listdir(target_scene_path)
             count = len([x for x in existing if os.path.isdir(os.path.join(target_scene_path, x)) or x.endswith('.lnk')]) + 1
             
-            link_name = f"({count}){pure_name}.lnk"
+            # NEW FORMAT: 1_Name.lnk
+            link_name = f"{count}_{pure_name}.lnk"
             link_full_path = os.path.join(target_scene_path, link_name)
             
             create_shortcut(source_real_path, link_full_path)
@@ -784,21 +797,39 @@ class PromptManagerApp(QMainWindow):
 
     def run_process(self):
         """
-        Callback for running generation.
+        Execute an external BAT script with selected node paths as arguments.
         """
         items = self.node_list.selectedItems()
         paths = [resolve_path(item.data(Qt.UserRole)) for item in items]
         
         if not paths:
-            QMessageBox.information(self, "Run", "没有选择动作节点")
-            return
+            # QMessageBox.information(self, "Run", "没有选择动作节点")
+            # return
+            paths = [self.current_scene_path]
 
-        # Mock Interface Call
-        msg = "调用接口生成:\n" + "\n".join(paths)
-        print(msg) 
-        QMessageBox.information(self, "Run Callback", msg)
-        # Here you would call your actual API:
-        # my_api.generate(paths)
+        # 1. Select BAT script (Save selection for session?)
+        if not hasattr(self, 'bat_script_path') or not self.bat_script_path:
+             start_dir = self.root_dir if self.root_dir else ""
+             file_path, _ = QFileDialog.getOpenFileName(self, "选择运行脚本 (Select .bat script)", start_dir, "Batch Files (*.bat);;All Files (*)")
+             if file_path:
+                 self.bat_script_path = file_path
+             else:
+                 return # Cancelled
+
+        # 2. Run with arguments
+        # We pass the paths as command line arguments to the bat script
+        try:
+            cmd = [self.bat_script_path] + paths
+            
+            # Windows specific flag to open a new console window so it doesn't freeze the GUI
+            creation_flags = 0
+            if sys.platform == "win32":
+                creation_flags = subprocess.CREATE_NEW_CONSOLE
+            
+            subprocess.Popen(cmd, cwd=os.path.dirname(self.bat_script_path), creationflags=creation_flags)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Run Error", f"执行脚本失败:\n{e}")
 
     # --- Context Menus ---
 
