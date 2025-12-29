@@ -364,8 +364,17 @@ class PromptManagerApp(QMainWindow):
             # Use scandir for faster directory listing
             with os.scandir(scene_path) as it:
                 for entry in it:
-                    if entry.is_dir() or entry.name.lower().endswith('.lnk'):
-                        items.append(entry.name)
+                    # Check for tags.txt to filter valid nodes
+                    target_path = None
+                    if entry.is_dir():
+                        target_path = entry.path
+                    elif entry.name.lower().endswith('.lnk'):
+                        target_path = resolve_path(entry.path)
+                    
+                    # Only add if target is a directory and contains tags.txt
+                    if target_path and os.path.isdir(target_path):
+                        if os.path.exists(os.path.join(target_path, "tags.txt")):
+                            items.append(entry.name)
         except OSError:
             pass
         
