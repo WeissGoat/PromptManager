@@ -2,14 +2,15 @@ import sys
 import os
 import random
 import re
+from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QLabel, QPushButton, 
                                QListWidget, QListWidgetItem, QFileDialog, 
                                QScrollArea, QFrame, QCheckBox, QSplitter, 
                                QTabWidget, QProgressBar, QMessageBox, QLineEdit, 
-                               QGridLayout, QStyle, QInputDialog)
+                               QGridLayout, QStyle, QInputDialog, QMenu)
 from PySide6.QtCore import Qt, Signal, QTimer, QSize
-from PySide6.QtGui import QColor, QPalette, QFont
+from PySide6.QtGui import QColor, QPalette, QFont, QAction
 
 # --- Mock Interfaces (模拟接口) ---
 
@@ -81,6 +82,7 @@ class TagChip(QLabel):
     单个标签组件。
     支持点击切换启用/禁用状态。
     支持双击编辑。
+    支持错误状态高亮。
     """
     toggled = Signal(bool) # 状态改变信号
     edited = Signal(str)   # 文本修改信号
@@ -92,14 +94,21 @@ class TagChip(QLabel):
         self.base_color = color
         self.is_active = True
         
+        # Error state
+        self.is_error = False
+        self.error_msg = ""
+        
         self.setFont(QFont("Arial", 10))
         self.setMargin(5)
         self.setAlignment(Qt.AlignCenter)
         self.setCursor(Qt.PointingHandCursor)
         
-        # 移除了单个Tag的括号检测，改为依赖全局检测
-        # self.has_error = not self.check_brackets(text) 
-        
+        self.update_style()
+
+    def set_error_state(self, is_error, msg=""):
+        """设置错误状态并更新样式"""
+        self.is_error = is_error
+        self.error_msg = msg
         self.update_style()
 
     def mousePressEvent(self, event):
@@ -121,12 +130,14 @@ class TagChip(QLabel):
         if self.is_active != active:
             self.is_active = active
             self.update_style()
-            # 注意：这里我们不发送 toggled 信号以避免递归循环，
-            # 或者是让父级逻辑处理数据同步
 
     def update_style(self):
-        # 移除了红色边框警告
-        border = "1px solid #aaa"
+        # 优先级: Error > Active/Inactive
+        
+        if self.is_error:
+            border = "2px solid red"
+        else:
+            border = "1px solid #aaa"
         
         if self.is_active:
             bg = self.base_color
@@ -149,8 +160,12 @@ class TagChip(QLabel):
                 padding: 4px 8px;
             """
         self.setStyleSheet(style)
-        # Tooltip shows category
-        self.setToolTip(f"Type: {self.category}\nDouble-click to edit")
+        
+        # Update Tooltip based on state
+        if self.is_error and self.error_msg:
+            self.setToolTip(f"❌ 错误: {self.error_msg}")
+        else:
+            self.setToolTip(f"Type: {self.category}\nDouble-click to edit")
 
 class FlowLayoutWidget(QWidget):
     """
@@ -337,11 +352,26 @@ class PromptConverterApp(QMainWindow):
         self.input_tabs.addTab(img_tab, "图片反推")
         
         # 2. Item List
+        # Update layout to include Clear button header
+        list_header_layout = QHBoxLayout()
+        list_header_layout.addWidget(QLabel("待处理列表 (Items):"))
+        
+        btn_clear = QPushButton("清空列表")
+        btn_clear.setFixedWidth(80)
+        btn_clear.setStyleSheet("background-color: #ffcccc; color: #cc0000; border: 1px solid #ff9999; border-radius: 3px;")
+        btn_clear.clicked.connect(self.clear_all_items)
+        
+        list_header_layout.addStretch()
+        list_header_layout.addWidget(btn_clear)
+        
         self.item_list_widget = QListWidget()
         self.item_list_widget.currentRowChanged.connect(self.load_item_details)
+        # Context Menu for Delete
+        self.item_list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.item_list_widget.customContextMenuRequested.connect(self.show_item_context_menu)
 
         left_layout.addWidget(self.input_tabs, 1)
-        left_layout.addWidget(QLabel("待处理列表 (Items):"))
+        left_layout.addLayout(list_header_layout)
         left_layout.addWidget(self.item_list_widget, 2)
 
         # === Middle Column: Editor & Visualizer ===
@@ -356,15 +386,31 @@ class PromptConverterApp(QMainWindow):
         self.lbl_warning = QLabel("")
         self.lbl_warning.setStyleSheet("color: red; font-weight: bold;")
 
-        # Flow Editor
+        # Flow Editor (Main)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self.flow_widget = FlowLayoutWidget()
         scroll.setWidget(self.flow_widget)
         
+        # Diff Section (New)
+        self.diff_group = QFrame()
+        self.diff_group.setFrameStyle(QFrame.StyledPanel)
+        diff_layout = QVBoxLayout(self.diff_group)
+        diff_layout.addWidget(QLabel("与上一条目的差异 (Diff):"))
+        
+        diff_scroll = QScrollArea()
+        diff_scroll.setWidgetResizable(True)
+        diff_scroll.setMaximumHeight(120) # Compact height
+        self.diff_flow_widget = FlowLayoutWidget()
+        diff_scroll.setWidget(self.diff_flow_widget)
+        diff_layout.addWidget(diff_scroll)
+        
+        self.diff_group.setVisible(False) # Default hidden
+        
         mid_layout.addWidget(self.lbl_current_info)
         mid_layout.addWidget(self.lbl_warning)
-        mid_layout.addWidget(scroll)
+        mid_layout.addWidget(scroll, 3) # More space for main editor
+        mid_layout.addWidget(self.diff_group, 1) # Less space for diff
 
         # === Right Column: Filters & Export ===
         right_panel = QWidget()
@@ -414,6 +460,21 @@ class PromptConverterApp(QMainWindow):
         
         layout.addWidget(splitter)
 
+    # --- Helper Functions ---
+    
+    def generate_unique_name(self, base_name):
+        """Generates a unique name by appending _1, _2, etc. if needed."""
+        existing_names = {item.name for item in self.items}
+        if base_name not in existing_names:
+            return base_name
+        
+        counter = 1
+        while True:
+            candidate = f"{base_name}_{counter}"
+            if candidate not in existing_names:
+                return candidate
+            counter += 1
+
     # --- Import Logic ---
 
     def import_from_text(self):
@@ -421,14 +482,18 @@ class PromptConverterApp(QMainWindow):
         if not text: return
         
         lines = text.strip().split('\n')
-        count = len(self.items) + 1
         
-        for i, line in enumerate(lines):
+        for line in lines:
             if not line.strip(): continue
-            name = f"Text_Item_{count + i}"
+            # Use unique naming logic
+            name = self.generate_unique_name("Text_Item")
             item = PromptItem(name, line)
             self.items.append(item)
-            self.item_list_widget.addItem(f"{count+i}. {name}")
+            
+            # Add to UI
+            # We add a custom widget item or just text
+            # For simplicity, using text, but the row index corresponds to self.items list index
+            self.item_list_widget.addItem(name)
         
         self.update_filters()
         QMessageBox.information(self, "导入完成", f"已添加 {len(lines)} 条文本数据")
@@ -440,21 +505,73 @@ class PromptConverterApp(QMainWindow):
         files = [f for f in os.listdir(folder) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
         if not files: return
         
-        count = len(self.items) + 1
         # In real app, run this in thread
         self.img_status_label.setText("正在分析图片...")
         QApplication.processEvents()
         
-        for i, f in enumerate(files):
+        for f in files:
             path = os.path.join(folder, f)
             # Call Mock API
             prompt = api.image_to_prompt(path)
-            item = PromptItem(f, prompt, is_image=True, image_path=path)
+            
+            # Use filename (without extension) as base name for unique naming
+            base_name = os.path.splitext(f)[0]
+            unique_name = self.generate_unique_name(base_name)
+            
+            item = PromptItem(unique_name, prompt, is_image=True, image_path=path)
             self.items.append(item)
-            self.item_list_widget.addItem(f"{count+i}. {f} [IMG]")
+            self.item_list_widget.addItem(f"{unique_name} [IMG]")
         
         self.img_status_label.setText(f"已导入 {len(files)} 张图片")
         self.update_filters()
+
+    # --- Context Menu Logic ---
+
+    def show_item_context_menu(self, pos):
+        item = self.item_list_widget.itemAt(pos)
+        if not item: return
+        
+        menu = QMenu()
+        del_act = QAction("删除 (Delete)", self)
+        del_act.triggered.connect(self.delete_selected_item)
+        menu.addAction(del_act)
+        menu.exec(self.item_list_widget.mapToGlobal(pos))
+
+    def delete_selected_item(self):
+        row = self.item_list_widget.currentRow()
+        if row < 0: return
+        
+        # Remove from data
+        self.items.pop(row)
+        # Remove from UI
+        self.item_list_widget.takeItem(row)
+        
+        # Reset view if list empty or selection changed
+        if not self.items:
+            self.clear_ui_state()
+        else:
+            # If we deleted the current item, logic handles refreshing to next item or none
+            # If row >= len(self.items), selection might be cleared or moved to last
+            pass
+        
+        self.update_filters()
+
+    def clear_all_items(self):
+        if not self.items: return
+        
+        confirm = QMessageBox.question(self, "确认", "确定要清空所有待处理项吗?", QMessageBox.Yes | QMessageBox.No)
+        if confirm == QMessageBox.Yes:
+            self.items.clear()
+            self.item_list_widget.clear()
+            self.clear_ui_state()
+            self.update_filters()
+
+    def clear_ui_state(self):
+        self.current_item_index = -1
+        self.flow_widget.clear_chips()
+        self.diff_group.setVisible(False) # Also hide diff
+        self.lbl_current_info.setText("请选择左侧列表项")
+        self.lbl_warning.setText("")
 
     # --- Display Logic ---
 
@@ -467,9 +584,6 @@ class PromptConverterApp(QMainWindow):
         self.lbl_current_info.setText(f"当前编辑: {item.name}")
         self.flow_widget.clear_chips()
         
-        # Check global brackets initially
-        self.check_global_brackets(item)
-
         # Create Chips
         for tag_data in item.parsed_tags:
             chip = self.flow_widget.add_chip(tag_data['text'], tag_data['category'])
@@ -485,6 +599,54 @@ class PromptConverterApp(QMainWindow):
             # Connect signals using closures
             chip.toggled.connect(lambda active, td=tag_data: self.on_chip_toggled(td, active))
             chip.edited.connect(lambda text, td=tag_data, c=chip: self.on_chip_edited(td, text, c))
+
+        # Perform check AFTER chips are populated
+        self.check_global_brackets(item)
+        
+        # Update Diff View
+        self.update_diff_view(item)
+
+    def update_diff_view(self, item):
+        """Calculates and displays diff between current item and previous item in the list."""
+        row = self.items.index(item)
+        
+        if row <= 0:
+            self.diff_group.setVisible(False)
+            return
+            
+        self.diff_group.setVisible(True)
+        self.diff_flow_widget.clear_chips()
+        
+        prev_item = self.items[row-1]
+        
+        # Get set of text for comparison
+        curr_tags = {t['text'] for t in item.parsed_tags}
+        prev_tags = {t['text'] for t in prev_item.parsed_tags}
+        
+        added = curr_tags - prev_tags
+        removed = prev_tags - curr_tags
+        
+        if not added and not removed:
+             # Can show "No Difference" or hide. Let's just keep it visible but empty or with label.
+             # Or hide it to save space if identical.
+             # Let's add a placeholder chip
+             pass
+
+        # Show Removed first (Red)
+        for tag in sorted(list(removed)):
+            chip = self.diff_flow_widget.add_chip(f"- {tag}", "Removed")
+            chip.base_color = "#ffcccc" # Red
+            chip.update_style()
+            chip.setToolTip("In previous, not in current")
+            # TagChips are interactive by default, clicking them in diff view doesn't change data model
+            # so it's fine.
+
+        # Show Added (Green)
+        for tag in sorted(list(added)):
+            chip = self.diff_flow_widget.add_chip(f"+ {tag}", "Added")
+            chip.base_color = "#ccffcc" # Green
+            chip.update_style()
+            chip.setToolTip("In current, not in previous")
 
     def on_chip_toggled(self, tag_data, active):
         """Handle chip active state toggling."""
@@ -508,38 +670,77 @@ class PromptConverterApp(QMainWindow):
         
         # Re-check brackets
         if self.current_item_index >= 0:
-            self.check_global_brackets(self.items[self.current_item_index])
+            item = self.items[self.current_item_index]
+            self.check_global_brackets(item)
+            # Update diff as text changed
+            self.update_diff_view(item)
         
         # Need to refresh filters list potentially if new category appeared
         self.update_filters()
 
     def check_global_brackets(self, item):
         """
-        Check brackets across ALL ENABLED tags for the item.
-        Ignores disabled tags.
+        Stack-based bracket checking across all enabled tags.
+        Highlights specific TagChips that cause errors.
         """
-        full_text = ""
-        for tag in item.parsed_tags:
-            if tag['enabled']:
-                full_text += tag['text'] + " "
+        # 1. Reset all errors first
+        for chip in self.flow_widget.chips:
+            chip.set_error_state(False)
         
-        open_b = full_text.count('(')
-        close_b = full_text.count(')')
-        open_sq = full_text.count('[')
-        close_sq = full_text.count(']')
-        open_cr = full_text.count('{')
-        close_cr = full_text.count('}')
+        stack = [] # Stores tuple: (bracket_char, chip_index)
+        pairs = {')': '(', ']': '[', '}': '{'}
         
-        warnings = []
-        if open_b != close_b:
-            warnings.append(f"()不匹配: {open_b} vs {close_b}")
-        if open_sq != close_sq:
-            warnings.append(f"[]不匹配: {open_sq} vs {close_sq}")
-        if open_cr != close_cr:
-            warnings.append(f"{{}}不匹配: {open_cr} vs {close_cr}")
+        # Map enabled tags to their chips index
+        # flow_widget.chips array corresponds 1-to-1 with item.parsed_tags
+        
+        first_error_msg = ""
+        
+        for i, tag_data in enumerate(item.parsed_tags):
+            if not tag_data['enabled']: continue
             
-        if warnings:
-            self.lbl_warning.setText("⚠️ " + "  ".join(warnings))
+            text = tag_data['text']
+            for char in text:
+                if char in "([{":
+                    stack.append((char, i))
+                elif char in ")]}":
+                    if not stack:
+                        # Case A: Unexpected closing bracket
+                        self.flow_widget.chips[i].set_error_state(True, f"多余的右括号 '{char}'")
+                        if not first_error_msg: first_error_msg = f"发现多余的 '{char}'"
+                        # We don't break here, we try to find more errors or just mark this one
+                    else:
+                        top_char, top_idx = stack[-1]
+                        if pairs[char] == top_char:
+                            # Match found, pop
+                            stack.pop()
+                        else:
+                            # Case B: Mismatch (e.g. expected ) got ] )
+                            # Mark CURRENT chip (closing bracket)
+                            self.flow_widget.chips[i].set_error_state(True, f"不匹配: 期望 '{top_char}' 的闭合，但发现了 '{char}'")
+                            
+                            # Mark OPENING chip (where the unmatched open bracket was)
+                            self.flow_widget.chips[top_idx].set_error_state(True, f"这里的 '{top_char}' 未正确闭合")
+                            
+                            if not first_error_msg: first_error_msg = f"符号不匹配: '{top_char}' vs '{char}'"
+                            
+                            # Assume typo and pop to continue checking? 
+                            # Or assume missing bracket?
+                            # Let's pop to prevent cascading errors from one typo
+                            stack.pop()
+
+        # Case C: Unclosed brackets remaining in stack
+        if stack:
+            unique_indices = set(idx for _, idx in stack)
+            for idx in unique_indices:
+                char = item.parsed_tags[idx]['text'] # rough approximation or logic
+                # Better: get the specific char from stack but for UI simple error is enough
+                self.flow_widget.chips[idx].set_error_state(True, "存在未闭合的左括号")
+            
+            if not first_error_msg:
+                first_error_msg = f"存在 {len(stack)} 个未闭合的左括号"
+
+        if first_error_msg:
+            self.lbl_warning.setText(f"⚠️ {first_error_msg}")
         else:
             self.lbl_warning.setText("")
 
@@ -611,16 +812,13 @@ class PromptConverterApp(QMainWindow):
             return
 
         count = 0
-        existing_folders = [f for f in os.listdir(target_dir) if os.path.isdir(os.path.join(target_dir, f))]
-        # Find max index to continue numbering
-        max_idx = 0
-        for f in existing_folders:
-            match = re.match(r'^(\d+)_', f)
-            if match:
-                idx = int(match.group(1))
-                if idx > max_idx: max_idx = idx
+        # Timestamp based naming
+        timestamp = datetime.now().strftime("%Y%m%d%H%M")
         
-        current_idx = max_idx + 1
+        # Find start index if we want to continue sequence or start from 1
+        # Reuquest says: StartupTime_Counter.
+        # This implies Counter starts from 1 for this export batch.
+        current_idx = 1
 
         for item in self.items:
             # Build valid tags
@@ -629,9 +827,8 @@ class PromptConverterApp(QMainWindow):
             
             prompt_content = ", ".join(valid_tags)
             
-            # Folder Name
-            safe_name = re.sub(r'[\\/:*?"<>|]', '', item.name)[:30] # Limit length
-            folder_name = f"{current_idx}_{safe_name}"
+            # Folder Name: YYYYMMDDHHMM_Counter
+            folder_name = f"{timestamp}_{current_idx}"
             folder_path = os.path.join(target_dir, folder_name)
             
             try:
@@ -643,9 +840,10 @@ class PromptConverterApp(QMainWindow):
                 
                 # Copy Reference Image if available
                 if item.is_image and item.image_path and os.path.exists(item.image_path):
-                    # Destination image name, let's keep it simple "ref.png" or original
+                    # Destination image name
+                    # We name it 'tmp.png' (or jpg) to act as the reference image for the manager
                     ext = os.path.splitext(item.image_path)[1]
-                    shutil.copy2(item.image_path, os.path.join(folder_path, f"ref{ext}"))
+                    shutil.copy2(item.image_path, os.path.join(folder_path, f"tmp{ext}"))
                 
                 count += 1
                 current_idx += 1
