@@ -2,6 +2,7 @@ import sys
 import os
 import random
 import re
+import html
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QLabel, QPushButton, 
@@ -27,6 +28,18 @@ class MockAIInterface:
             "white background": "Background", "standing": "Pose", "looking at viewer": "Pose",
             "monochrome": "Style", "sketch": "Style", "greyscale": "Style"
         }
+        
+        # 模拟翻译字典
+        self.translations = {
+            "1girl": "1个女孩", "solo": "单人", "long hair": "长发", 
+            "blue eyes": "蓝眼", "dress": "连衣裙", "masterpiece": "杰作",
+            "best quality": "最佳质量", "simple background": "简单背景",
+            "white background": "白背景", "standing": "站立", "looking at viewer": "看镜头",
+            "monochrome": "单色", "sketch": "素描", "greyscale": "灰度",
+            "red hair": "红发", "blue dress": "蓝裙子", "forest": "森林",
+            "cyberpunk": "赛博朋克", "mecha": "机甲", "cat ears": "猫耳"
+        }
+
         self.category_colors = {} # 动态分配颜色
         
         # 预定义一些好看的颜色 (Pastel tones)
@@ -52,6 +65,18 @@ class MockAIInterface:
             cat = cats[len(clean_tag) % len(cats)]
         
         return cat
+    
+    def translate_tag(self, tag_text):
+        """
+        输入 tag, 返回中文翻译
+        """
+        # 简单的清理
+        # 1. 去除括号
+        clean_tag = re.sub(r'[\(\)\[\]\{\}]', '', tag_text).strip().lower()
+        # 2. 去除权重 (例如 :1.2 或 :0.5)
+        clean_tag = re.sub(r':\d+(\.\d+)?$', '', clean_tag)
+        
+        return self.translations.get(clean_tag, "未知")
 
     def get_color_for_category(self, category):
         """
@@ -83,26 +108,30 @@ class TagChip(QLabel):
     支持点击切换启用/禁用状态。
     支持双击编辑。
     支持错误状态高亮。
+    支持显示翻译。
     """
     toggled = Signal(bool) # 状态改变信号
     edited = Signal(str)   # 文本修改信号
 
-    def __init__(self, text, category, color, parent=None):
+    def __init__(self, text, translation, category, color, parent=None):
         super().__init__(text, parent)
         self.full_text = text
+        self.translation = translation
         self.category = category
         self.base_color = color
         self.is_active = True
         
-        # Error state
+        # States
         self.is_error = False
         self.error_msg = ""
+        self.show_translation = False
         
         self.setFont(QFont("Arial", 10))
         self.setMargin(5)
         self.setAlignment(Qt.AlignCenter)
         self.setCursor(Qt.PointingHandCursor)
         
+        self.update_content()
         self.update_style()
 
     def set_error_state(self, is_error, msg=""):
@@ -110,6 +139,23 @@ class TagChip(QLabel):
         self.is_error = is_error
         self.error_msg = msg
         self.update_style()
+
+    def set_translation_mode(self, show):
+        """切换翻译显示模式"""
+        self.show_translation = show
+        self.update_content()
+
+    def update_content(self):
+        """更新显示的文本内容"""
+        if self.show_translation:
+            self.setTextFormat(Qt.RichText)
+            # 转义 HTML 字符，防止 <lora:...> 等包含尖括号的内容导致渲染异常
+            safe_text = html.escape(self.full_text)
+            # 使用 HTML 格式化显示，原文加粗，译文小一号
+            self.setText(f"<b>{safe_text}</b><br><span style='font-size:9px; color:#555;'>{self.translation}</span>")
+        else:
+            self.setTextFormat(Qt.PlainText)
+            self.setText(self.full_text)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -122,7 +168,9 @@ class TagChip(QLabel):
             text, ok = QInputDialog.getText(self, "编辑提示词", "修改提示词内容:", text=self.full_text)
             if ok and text:
                 self.full_text = text
-                self.setText(text)
+                # Re-fetch translation for new text
+                self.translation = api.translate_tag(text) 
+                self.update_content()
                 self.edited.emit(text)
 
     def set_active_by_filter(self, active):
@@ -162,10 +210,10 @@ class TagChip(QLabel):
         self.setStyleSheet(style)
         
         # Update Tooltip based on state
+        tooltip = f"Type: {self.category}\nTranslation: {self.translation}\nDouble-click to edit"
         if self.is_error and self.error_msg:
-            self.setToolTip(f"❌ 错误: {self.error_msg}")
-        else:
-            self.setToolTip(f"Type: {self.category}\nDouble-click to edit")
+            tooltip = f"❌ 错误: {self.error_msg}\n{tooltip}"
+        self.setToolTip(tooltip)
 
 class FlowLayoutWidget(QWidget):
     """
@@ -192,9 +240,9 @@ class FlowLayoutWidget(QWidget):
                 widget.deleteLater()
         self.chips = []
 
-    def add_chip(self, text, category):
+    def add_chip(self, text, translation, category):
         color = api.get_color_for_category(category)
-        chip = TagChip(text, category, color)
+        chip = TagChip(text, translation, category, color)
         self.flow_layout.addWidget(chip)
         self.chips.append(chip)
         return chip
@@ -378,9 +426,17 @@ class PromptConverterApp(QMainWindow):
         mid_panel = QWidget()
         mid_layout = QVBoxLayout(mid_panel)
         
-        # Header Info
+        # Header Info & Translation Toggle
+        header_layout = QHBoxLayout()
         self.lbl_current_info = QLabel("请选择左侧列表项")
         self.lbl_current_info.setStyleSheet("font-weight: bold; font-size: 14px;")
+        header_layout.addWidget(self.lbl_current_info)
+        
+        header_layout.addStretch()
+        
+        self.cb_translate = QCheckBox("显示翻译")
+        self.cb_translate.stateChanged.connect(self.toggle_translation)
+        header_layout.addWidget(self.cb_translate)
         
         # Warning Label (Brackets)
         self.lbl_warning = QLabel("")
@@ -400,17 +456,25 @@ class PromptConverterApp(QMainWindow):
         
         diff_scroll = QScrollArea()
         diff_scroll.setWidgetResizable(True)
-        diff_scroll.setMaximumHeight(120) # Compact height
+        # Removed maximum height to allow better resizing
+        diff_scroll.setMinimumHeight(100) 
         self.diff_flow_widget = FlowLayoutWidget()
         diff_scroll.setWidget(self.diff_flow_widget)
         diff_layout.addWidget(diff_scroll)
         
         self.diff_group.setVisible(False) # Default hidden
         
-        mid_layout.addWidget(self.lbl_current_info)
+        mid_layout.addLayout(header_layout) # Added Header with Translation toggle
         mid_layout.addWidget(self.lbl_warning)
-        mid_layout.addWidget(scroll, 3) # More space for main editor
-        mid_layout.addWidget(self.diff_group, 1) # Less space for diff
+        
+        # Use Splitter for resizable areas
+        mid_splitter = QSplitter(Qt.Vertical)
+        mid_splitter.addWidget(scroll)
+        mid_splitter.addWidget(self.diff_group)
+        mid_splitter.setStretchFactor(0, 3) # Editor takes 3 parts
+        mid_splitter.setStretchFactor(1, 1) # Diff takes 1 part
+        
+        mid_layout.addWidget(mid_splitter)
 
         # === Right Column: Filters & Export ===
         right_panel = QWidget()
@@ -574,6 +638,31 @@ class PromptConverterApp(QMainWindow):
         self.lbl_warning.setText("")
 
     # --- Display Logic ---
+    
+    def toggle_translation(self, state):
+        """Toggle translation visibility on all chips."""
+        show = (state == Qt.Checked)
+        
+        # 1. Update all chips content
+        for chip in self.flow_widget.chips:
+            chip.set_translation_mode(show)
+        for chip in self.diff_flow_widget.chips:
+            chip.set_translation_mode(show)
+            
+        # 2. Force layout recalculation
+        # TagChips changed size (setText called inside set_translation_mode triggers updateGeometry on chip)
+        # We need to tell the container widget to recalculate its layout hint for the ScrollArea
+        self.flow_widget.updateGeometry()
+        self.diff_flow_widget.updateGeometry()
+        
+        # 3. Manually trigger layout activation to resize immediately
+        if self.flow_widget.layout():
+            self.flow_widget.layout().activate()
+            self.flow_widget.layout().update()
+            
+        if self.diff_flow_widget.layout():
+            self.diff_flow_widget.layout().activate()
+            self.diff_flow_widget.layout().update()
 
     def load_item_details(self, row):
         if row < 0 or row >= len(self.items): return
@@ -586,7 +675,9 @@ class PromptConverterApp(QMainWindow):
         
         # Create Chips
         for tag_data in item.parsed_tags:
-            chip = self.flow_widget.add_chip(tag_data['text'], tag_data['category'])
+            trans = api.translate_tag(tag_data['text'])
+            chip = self.flow_widget.add_chip(tag_data['text'], trans, tag_data['category'])
+            chip.set_translation_mode(self.cb_translate.isChecked())
             
             # Restore state
             is_enabled = tag_data['enabled']
@@ -634,7 +725,9 @@ class PromptConverterApp(QMainWindow):
 
         # Show Removed first (Red)
         for tag in sorted(list(removed)):
-            chip = self.diff_flow_widget.add_chip(f"- {tag}", "Removed")
+            trans = api.translate_tag(tag)
+            chip = self.diff_flow_widget.add_chip(f"- {tag}", trans, "Removed")
+            chip.set_translation_mode(self.cb_translate.isChecked())
             chip.base_color = "#ffcccc" # Red
             chip.update_style()
             chip.setToolTip("In previous, not in current")
@@ -643,7 +736,9 @@ class PromptConverterApp(QMainWindow):
 
         # Show Added (Green)
         for tag in sorted(list(added)):
-            chip = self.diff_flow_widget.add_chip(f"+ {tag}", "Added")
+            trans = api.translate_tag(tag)
+            chip = self.diff_flow_widget.add_chip(f"+ {tag}", trans, "Added")
+            chip.set_translation_mode(self.cb_translate.isChecked())
             chip.base_color = "#ccffcc" # Green
             chip.update_style()
             chip.setToolTip("In current, not in previous")
