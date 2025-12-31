@@ -5,7 +5,8 @@ import re
 import subprocess
 import glob
 import tempfile
-import html  # Added for HTML escaping in diff view
+import html
+import json
 from pathlib import Path
 
 # PySide6 Imports
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QPushButton, QFileDialog, QMenu, QInputDialog, 
                                QMessageBox, QAbstractItemView, QFrame, QLineEdit, QDialog, QDialogButtonBox)
 from PySide6.QtCore import Qt, QSize, QUrl, Signal, QPoint
-from PySide6.QtGui import QPixmap, QAction, QIcon, QDragEnterEvent, QDropEvent, QMouseEvent, QWheelEvent, QImageReader
+from PySide6.QtGui import QPixmap, QAction, QIcon, QDragEnterEvent, QDropEvent, QMouseEvent, QWheelEvent, QImageReader, QColor, QBrush
 
 # Windows Shortcut Handling
 try:
@@ -187,6 +188,10 @@ class PromptManagerApp(QMainWindow):
         self.previous_node_path = None # Track last selected node for diff
         self.last_selected_node_index = 0
         self.bat_script_path = r"C:\Users\WhiteSheep\AppData\Roaming\Microsoft\Windows\SendTo\ct.blackboard.run_next_character.bat" # Store selected bat script path
+        # Bookmarks State
+        self.bookmarks = set()
+        self.bookmarks_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bookmarks.json")
+        self.load_bookmarks()
         
         # Preview State
         self.image_sources = [] # List of dicts: {'name', 'path', 'status': 'valid'|'pending'|'invalid'}
@@ -350,7 +355,22 @@ class PromptManagerApp(QMainWindow):
             else:
                 sys.exit() # Exit if no folder selected
         self.load_scenes()
-        
+    
+    def load_bookmarks(self):
+        if os.path.exists(self.bookmarks_file):
+            try:
+                with open(self.bookmarks_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.bookmarks = set(data.get("scenes", []))
+            except:
+                self.bookmarks = set()
+
+    def save_bookmarks(self):
+        try:
+            with open(self.bookmarks_file, 'w', encoding='utf-8') as f:
+                json.dump({"scenes": list(self.bookmarks)}, f)
+        except Exception as e:
+            print(f"Failed to save bookmarks: {e}")
 
     def load_scenes(self):
         self.scene_tree.clear()
@@ -362,8 +382,29 @@ class PromptManagerApp(QMainWindow):
 
         for scene in scenes:
             item = QTreeWidgetItem(self.scene_tree)
-            item.setText(0, scene)
             item.setData(0, Qt.UserRole, os.path.join(self.root_dir, scene))
+            
+            # Apply Bookmark Style
+            self.update_scene_item_style(item, scene)
+
+    def update_scene_item_style(self, item, scene_name):
+        is_bookmarked = scene_name in self.bookmarks
+        
+        if is_bookmarked:
+            item.setText(0, f"⭐ {scene_name}")
+            # Light Yellow background for visibility
+            brush = QBrush(QColor("#FFF9C4")) 
+            item.setBackground(0, brush)
+            # Make text bold?
+            font = item.font(0)
+            font.setBold(True)
+            item.setFont(0, font)
+        else:
+            item.setText(0, scene_name)
+            item.setBackground(0, QBrush(Qt.NoBrush)) # Reset
+            font = item.font(0)
+            font.setBold(False)
+            item.setFont(0, font)
 
     def on_scene_selected(self, item, column):
         path = item.data(0, Qt.UserRole)
@@ -961,11 +1002,33 @@ class PromptManagerApp(QMainWindow):
         if not item: return
         
         path = item.data(0, Qt.UserRole)
+        name = item.text(0).replace("⭐ ", "") # Clean name for logic if needed
+        is_bookmarked = name in self.bookmarks
+        
         menu = QMenu()
+        
+        # Bookmark Action
+        bookmark_text = "取消书签 (Remove Bookmark)" if is_bookmarked else "加入书签 (Add Bookmark)"
+        bookmark_act = QAction(bookmark_text, self)
+        bookmark_act.triggered.connect(lambda: self.toggle_bookmark(item, name))
+        menu.addAction(bookmark_act)
+        
+        menu.addSeparator()
+        
         open_act = QAction("在资源管理器中打开", self)
         open_act.triggered.connect(lambda: os.startfile(path))
         menu.addAction(open_act)
+        
         menu.exec(self.scene_tree.mapToGlobal(pos))
+
+    def toggle_bookmark(self, item, name):
+        if name in self.bookmarks:
+            self.bookmarks.remove(name)
+        else:
+            self.bookmarks.add(name)
+        
+        self.save_bookmarks()
+        self.update_scene_item_style(item, name)
 
     def show_node_context_menu(self, pos):
         item = self.node_list.itemAt(pos)
