@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QTreeWidget, QTreeWidgetItem, QListWidget, 
                                QListWidgetItem, QTextEdit, QLabel, QSplitter, 
                                QPushButton, QFileDialog, QMenu, QInputDialog, 
-                               QMessageBox, QAbstractItemView, QFrame, QLineEdit, QDialog, QDialogButtonBox)
+                               QMessageBox, QAbstractItemView, QFrame, QLineEdit, 
+                               QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem, QHeaderView)
 from PySide6.QtCore import Qt, QSize, QUrl, Signal, QPoint
 from PySide6.QtGui import QPixmap, QAction, QIcon, QDragEnterEvent, QDropEvent, QMouseEvent, QWheelEvent, QImageReader, QColor, QBrush
 
@@ -116,6 +117,96 @@ def clean_node_name(name):
 
 # --- Custom Widgets ---
 
+class RunParamsDialog(QDialog):
+    """
+    Dialog to edit key-value parameters before running.
+    Persists data to run_params.json.
+    """
+    def __init__(self, params_file, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("运行参数配置 (Run Parameters)")
+        self.resize(500, 350)
+        self.params_file = params_file
+        self.params_data = {}
+        
+        self.layout = QVBoxLayout(self)
+        
+        # Info
+        self.layout.addWidget(QLabel("设置传递给脚本的额外参数 (Key=Value):"))
+        
+        # Table
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["参数名 (Key)", "参数值 (Value)"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.layout.addWidget(self.table)
+        
+        # Edit Buttons
+        btn_layout = QHBoxLayout()
+        self.btn_add = QPushButton("添加参数 (+)")
+        self.btn_add.clicked.connect(self.add_row)
+        self.btn_del = QPushButton("删除选中 (-)")
+        self.btn_del.clicked.connect(self.remove_row)
+        btn_layout.addWidget(self.btn_add)
+        btn_layout.addWidget(self.btn_del)
+        self.layout.addLayout(btn_layout)
+        
+        # Dialog Buttons
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box.button(QDialogButtonBox.Ok).setText("运行 (Run)")
+        self.button_box.button(QDialogButtonBox.Cancel).setText("取消 (Cancel)")
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        self.layout.addWidget(self.button_box)
+        
+        self.load_params()
+
+    def add_row(self):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem("Key"))
+        self.table.setItem(row, 1, QTableWidgetItem("Value"))
+
+    def remove_row(self):
+        current_row = self.table.currentRow()
+        if current_row >= 0:
+            self.table.removeRow(current_row)
+
+    def load_params(self):
+        if os.path.exists(self.params_file):
+            try:
+                with open(self.params_file, 'r', encoding='utf-8') as f:
+                    self.params_data = json.load(f)
+                    for k, v in self.params_data.items():
+                        row = self.table.rowCount()
+                        self.table.insertRow(row)
+                        self.table.setItem(row, 0, QTableWidgetItem(str(k)))
+                        self.table.setItem(row, 1, QTableWidgetItem(str(v)))
+            except Exception as e:
+                print(f"Error loading params: {e}")
+
+    def save_params(self):
+        data = {}
+        for i in range(self.table.rowCount()):
+            key_item = self.table.item(i, 0)
+            val_item = self.table.item(i, 1)
+            if key_item and val_item and key_item.text().strip():
+                data[key_item.text().strip()] = val_item.text().strip()
+        
+        self.params_data = data
+        try:
+            with open(self.params_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error saving params: {e}")
+
+    def accept(self):
+        self.save_params()
+        super().accept()
+        
+    def get_params_list(self):
+        """Returns list of 'key=value' strings"""
+        return [f"--{k}%{v}" for k, v in self.params_data.items()]
+
 class ClickableImageLabel(QLabel):
     """
     Preview Box: 
@@ -186,12 +277,16 @@ class PromptManagerApp(QMainWindow):
         self.current_scene_path = None
         self.current_node_path = None
         self.previous_node_path = None # Track last selected node for diff
-        self.last_selected_node_index = 0
+        self.scene_selection_history = {} # {scene_path: selected_row_index}
         self.bat_script_path = r"C:\Users\WhiteSheep\AppData\Roaming\Microsoft\Windows\SendTo\ct.blackboard.run_next_character.bat" # Store selected bat script path
+        
         # Bookmarks State
         self.bookmarks = set()
         self.bookmarks_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bookmarks.json")
         self.load_bookmarks()
+        
+        # Run Params File
+        self.run_params_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_params.json")
         
         # Preview State
         self.image_sources = [] # List of dicts: {'name', 'path', 'status': 'valid'|'pending'|'invalid'}
@@ -408,21 +503,26 @@ class PromptManagerApp(QMainWindow):
 
     def on_scene_selected(self, item, column):
         path = item.data(0, Qt.UserRole)
+        
+        # Save current scene selection before switching
+        if self.current_scene_path:
+            self.scene_selection_history[self.current_scene_path] = self.node_list.currentRow()
+
         if self.current_scene_path == path:
             return
         
         self.current_scene_path = path
         self.load_nodes_for_scene(path)
         
-        # Select default/last node
-        count = self.node_list.count()
-        if count > 0:
-            idx = 0
-            # Try to restore last selection index if valid, else 0
-            if 0 <= self.last_selected_node_index < count:
-                idx = self.last_selected_node_index
-            self.node_list.setCurrentRow(idx)
-            self.on_node_selected(self.node_list.item(idx))
+        # Restore selection for this scene
+        idx = 0
+        if path in self.scene_selection_history:
+            saved_idx = self.scene_selection_history[path]
+            if 0 <= saved_idx < self.node_list.count():
+                idx = saved_idx
+        
+        self.node_list.setCurrentRow(idx)
+        self.on_node_selected(self.node_list.item(idx))
 
     def load_nodes_for_scene(self, scene_path):
         self.node_list.clear()
@@ -961,14 +1061,14 @@ class PromptManagerApp(QMainWindow):
 
     def run_process(self):
         """
-        Execute an external BAT script with selected node paths as arguments.
+        Run with dialog to add extra params.
         """
         items = self.node_list.selectedItems()
         paths = [resolve_path(item.data(Qt.UserRole)) for item in items]
         
         if not paths:
-            # QMessageBox.information(self, "Run", "没有选择动作节点")
-            # return
+            # Fallback if no specific node selected? Maybe run current scene context?
+            # Or assume current scene path itself
             paths = [self.current_scene_path]
 
         # 1. Select BAT script (Save selection for session?)
@@ -980,20 +1080,25 @@ class PromptManagerApp(QMainWindow):
              else:
                  return # Cancelled
 
-        # 2. Run with arguments
-        # We pass the paths as command line arguments to the bat script
-        try:
-            cmd = [self.bat_script_path] + paths
+        # 2. Show Params Dialog
+        dlg = RunParamsDialog(self.run_params_file, self)
+        if dlg.exec() == QDialog.Accepted:
+            extra_params = dlg.get_params_list() # ["key=val", "key2=val2"]
             
-            # Windows specific flag to open a new console window so it doesn't freeze the GUI
-            creation_flags = 0
-            if sys.platform == "win32":
-                creation_flags = subprocess.CREATE_NEW_CONSOLE
-            
-            subprocess.Popen(cmd, cwd=os.path.dirname(self.bat_script_path), creationflags=creation_flags)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Run Error", f"执行脚本失败:\n{e}")
+            # 3. Construct Command
+            # Command structure: script.bat "path1" "path2" "key=val" "key2=val2"
+            cmd = [self.bat_script_path] + paths + extra_params
+            cmd = ' '.join(cmd)
+            print(f"Running command: {cmd}")
+            try:
+                # Windows specific flag to open a new console window
+                creation_flags = 0
+                if sys.platform == "win32":
+                    creation_flags = subprocess.CREATE_NEW_CONSOLE
+                
+                subprocess.Popen(cmd, cwd=os.path.dirname(self.bat_script_path), creationflags=creation_flags)
+            except Exception as e:
+                QMessageBox.critical(self, "Run Error", f"执行脚本失败:\n{e}")
 
     # --- Context Menus ---
 
