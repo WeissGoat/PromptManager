@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QPushButton, QFileDialog, QMenu, QInputDialog, 
                                QMessageBox, QAbstractItemView, QFrame, QLineEdit, 
                                QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem, QHeaderView)
-from PySide6.QtCore import Qt, QSize, QUrl, Signal, QPoint
+from PySide6.QtCore import Qt, QSize, QUrl, Signal, QPoint, QFile
 from PySide6.QtGui import QPixmap, QAction, QIcon, QDragEnterEvent, QDropEvent, QMouseEvent, QWheelEvent, QImageReader, QColor, QBrush
 
 # Windows Shortcut Handling
@@ -1088,8 +1088,7 @@ class PromptManagerApp(QMainWindow):
             # 3. Construct Command
             # Command structure: script.bat "path1" "path2" "key=val" "key2=val2"
             cmd = [self.bat_script_path] + paths + extra_params
-            cmd = ' '.join(cmd)
-            print(f"Running command: {cmd}")
+            
             try:
                 # Windows specific flag to open a new console window
                 creation_flags = 0
@@ -1139,12 +1138,37 @@ class PromptManagerApp(QMainWindow):
         item = self.node_list.itemAt(pos)
         if not item: return
         
-        path = resolve_path(item.data(Qt.UserRole))
+        # Resolve for opening
+        resolved_path = resolve_path(item.data(Qt.UserRole))
+        
         menu = QMenu()
+        
         open_act = QAction("在资源管理器中打开", self)
-        open_act.triggered.connect(lambda: os.startfile(path))
+        open_act.triggered.connect(lambda: os.startfile(resolved_path))
         menu.addAction(open_act)
+        
+        menu.addSeparator()
+        
+        del_act = QAction("删除 (移至回收站)", self)
+        del_act.triggered.connect(self.delete_selected_nodes)
+        menu.addAction(del_act)
+        
         menu.exec(self.node_list.mapToGlobal(pos))
+
+    def delete_selected_nodes(self):
+        items = self.node_list.selectedItems()
+        if not items: return
+        
+        confirm = QMessageBox.question(self, "确认删除", f"确定要将这 {len(items)} 个节点移至回收站吗?", QMessageBox.Yes | QMessageBox.No)
+        if confirm == QMessageBox.Yes:
+            for item in items:
+                path = item.data(Qt.UserRole) # Use direct path (lnk or folder)
+                if QFile.moveToTrash(path):
+                    # Remove from list
+                    row = self.node_list.row(item)
+                    self.node_list.takeItem(row)
+                else:
+                    print(f"Failed to delete {path}")
 
 # --- Entry Point ---
 from PySide6.QtWidgets import QTreeWidgetItemIterator # Added specific import needed later
