@@ -14,6 +14,9 @@ from PySide6.QtCore import Qt, Signal, QTimer, QSize
 from PySide6.QtGui import QColor, QPalette, QFont, QAction
 
 # --- Mock Interfaces (模拟接口) ---
+sys.path.append(r"F:\ThreeState")
+
+import danbooru_api
 
 class MockAIInterface:
     """
@@ -64,7 +67,7 @@ class MockAIInterface:
             # 为了演示一致性，根据字符长度hash一下
             cat = cats[len(clean_tag) % len(cats)]
         
-        return cat
+        return str(danbooru_api.get_tag_type(tag_text))
     
     def translate_tag(self, tag_text):
         """

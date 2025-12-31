@@ -5,6 +5,7 @@ import re
 import subprocess
 import glob
 import tempfile
+import html  # Added for HTML escaping in diff view
 from pathlib import Path
 
 # PySide6 Imports
@@ -25,6 +26,8 @@ except ImportError:
     print("Warning: pywin32 not installed. .lnk support will be limited.")
 
 # --- Helper Functions ---
+def get_ori_prompt(prompt):
+    return prompt.split('\n=')[0]
 
 def resolve_path(path):
     """
@@ -181,6 +184,7 @@ class PromptManagerApp(QMainWindow):
         self.root_dir = r"D:\AI\design\动作改2"
         self.current_scene_path = None
         self.current_node_path = None
+        self.previous_node_path = None # Track last selected node for diff
         self.last_selected_node_index = 0
         self.bat_script_path = r"C:\Users\WhiteSheep\AppData\Roaming\Microsoft\Windows\SendTo\ct.blackboard.run_next_character.bat" # Store selected bat script path
         
@@ -258,12 +262,38 @@ class PromptManagerApp(QMainWindow):
         self.source_info_label.setAlignment(Qt.AlignRight)
         self.source_info_label.setStyleSheet("font-size: 10px; color: #666;")
 
-        # 2. Prompt Editor
+        # Text Area Splitter (Editor vs Diff)
+        text_splitter = QSplitter(Qt.Vertical)
+
+        # 2. Prompt Editor Container
+        editor_container = QWidget()
+        ec_layout = QVBoxLayout(editor_container)
+        ec_layout.setContentsMargins(0, 0, 0, 0)
         editor_label = QLabel("提示词编辑 (Prompts)")
         editor_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
         self.prompt_editor = QTextEdit()
+        self.prompt_editor.textChanged.connect(self.on_prompt_edited) # Connect for realtime diff
+        ec_layout.addWidget(editor_label)
+        ec_layout.addWidget(self.prompt_editor)
+
+        # 3. Diff Viewer Container (NEW)
+        diff_container = QWidget()
+        dc_layout = QVBoxLayout(diff_container)
+        dc_layout.setContentsMargins(0, 0, 0, 0)
+        diff_label = QLabel("与上一次选中差异 (Diff vs Last Selected):")
+        diff_label.setStyleSheet("font-weight: bold; margin-top: 5px; color: #555;")
+        self.diff_viewer = QTextEdit()
+        self.diff_viewer.setReadOnly(True)
+        self.diff_viewer.setStyleSheet("background-color: #f8f8f8; color: #333; font-family: Consolas, monospace;")
+        dc_layout.addWidget(diff_label)
+        dc_layout.addWidget(self.diff_viewer)
+
+        text_splitter.addWidget(editor_container)
+        text_splitter.addWidget(diff_container)
+        text_splitter.setStretchFactor(0, 3) # Editor takes 3 parts
+        text_splitter.setStretchFactor(1, 1) # Diff takes 1 part
         
-        # 3. Buttons Area
+        # 4. Buttons Area
         btn_layout = QHBoxLayout()
         
         self.btn_save = QPushButton("保存 (Save)")
@@ -298,8 +328,7 @@ class PromptManagerApp(QMainWindow):
         # Add to Right Layout
         right_layout.addWidget(self.preview_label, 2) # Stretch factor 2
         right_layout.addWidget(self.source_info_label)
-        right_layout.addWidget(editor_label)
-        right_layout.addWidget(self.prompt_editor, 1) # Stretch factor 1
+        right_layout.addWidget(text_splitter, 3) # Splitter takes more space
         right_layout.addLayout(btn_layout)
         right_layout.addLayout(tools_layout)
 
@@ -388,20 +417,33 @@ class PromptManagerApp(QMainWindow):
 
     def on_node_selected(self, item):
         if not item: return
-        self.current_node_path = item.data(Qt.UserRole)
+        
+        new_path = item.data(Qt.UserRole)
+        
+        # Only update history if the path is actually different
+        # This prevents history update on re-clicking the same item or UI refreshes
+        if self.current_node_path and self.current_node_path != new_path:
+             self.previous_node_path = self.current_node_path
+        
+        self.current_node_path = new_path
         self.last_selected_node_index = self.node_list.row(item)
         
         # Resolve path (in case of .lnk)
         real_path = resolve_path(self.current_node_path)
         
-        # 1. Load Tags
+        # 1. Load Tags (Must happen before calculating diff)
         self.load_tags(real_path)
         
-        # 2. Setup Preview Logic (Lazy Load)
+        # 2. Update Diff with Previous Node
+        self.update_diff_display(item)
+        
+        # 3. Setup Preview Logic (Lazy Load)
         self.setup_preview_sources(real_path)
 
     def load_tags(self, folder_path):
         tag_file = os.path.join(folder_path, "tags.txt")
+        # Block signals to prevent triggering diff update while loading
+        self.prompt_editor.blockSignals(True)
         if os.path.exists(tag_file):
             try:
                 with open(tag_file, 'r', encoding='utf-8') as f:
@@ -410,6 +452,78 @@ class PromptManagerApp(QMainWindow):
                 self.prompt_editor.setText(f"Error reading tags: {e}")
         else:
             self.prompt_editor.clear()
+        self.prompt_editor.blockSignals(False)
+
+    def read_tags_content(self, folder_path):
+        """Helper to read tags without loading into editor"""
+        tag_file = os.path.join(folder_path, "tags.txt")
+        if os.path.exists(tag_file):
+            try:
+                with open(tag_file, 'r', encoding='utf-8') as f:
+                    return f.read()
+            except:
+                return ""
+        return ""
+
+    def on_prompt_edited(self):
+        """Called when user types in prompt editor. Updates diff in real-time."""
+        item = self.node_list.currentItem()
+        if item:
+            self.update_diff_display(item)
+
+    def update_diff_display(self, current_item):
+        """Calculates difference between current editor text and PREVIOUSLY SELECTED node's file text."""
+        
+        if not self.previous_node_path:
+            self.diff_viewer.clear()
+            self.diff_viewer.setPlaceholderText("无上一次选中记录 (No previous selection)")
+            return
+            
+        # Get Previous Node Path
+        prev_path = resolve_path(self.previous_node_path)
+        
+        if not os.path.exists(prev_path):
+             self.diff_viewer.clear()
+             self.diff_viewer.setPlaceholderText("上一次选中的节点已不存在")
+             return
+        
+        # Read Contents
+        prev_text = get_ori_prompt(self.read_tags_content(prev_path))
+        curr_text = get_ori_prompt(self.prompt_editor.toPlainText()) # Current active text
+        
+        # Simple Parser (Comma separated)
+        def parse_tags(text):
+            # Clean up newlines and extra spaces
+            # Assuming format: tag1, tag2, tag3...
+            # Also handle multiline if user uses lines
+            clean = text.replace('\n', ',')
+            return {t.strip() for t in clean.split(',') if t.strip()}
+            
+        prev_tags = parse_tags(prev_text)
+        curr_tags = parse_tags(curr_text)
+        
+        added = curr_tags - prev_tags
+        removed = prev_tags - curr_tags
+        
+        # Generate HTML
+        html_content = ""
+        if not added and not removed:
+            html_content = "<span style='color:#888;'>无差异 (No changes)</span>"
+        else:
+            # Removed (Red)
+            for tag in sorted(list(removed)):
+                safe_tag = html.escape(tag)
+                html_content += f"<span style='background-color:#ffe6e6; color:#cc0000; padding:2px 4px; border-radius:3px; margin:2px;'>- {safe_tag}</span> "
+            
+            if removed and added:
+                html_content += "<br><br>"
+                
+            # Added (Green)
+            for tag in sorted(list(added)):
+                safe_tag = html.escape(tag)
+                html_content += f"<span style='background-color:#e6ffe6; color:#006600; padding:2px 4px; border-radius:3px; margin:2px;'>+ {safe_tag}</span> "
+                
+        self.diff_viewer.setHtml(html_content)
 
     # --- Logic: Preview System ---
 
