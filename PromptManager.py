@@ -17,7 +17,9 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QMessageBox, QAbstractItemView, QFrame, QLineEdit, 
                                QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem, QHeaderView)
 from PySide6.QtCore import Qt, QSize, QUrl, Signal, QPoint, QFile
-from PySide6.QtGui import QPixmap, QAction, QIcon, QDragEnterEvent, QDropEvent, QMouseEvent, QWheelEvent, QImageReader, QColor, QBrush
+from PySide6.QtGui import (QPixmap, QAction, QIcon, QDragEnterEvent, QDropEvent, 
+                           QMouseEvent, QWheelEvent, QImageReader, QColor, QBrush,
+                           QShortcut, QKeySequence, QTextCursor, QTextDocument, QTextCharFormat)
 
 # Windows Shortcut Handling
 try:
@@ -369,14 +371,49 @@ class PromptManagerApp(QMainWindow):
         editor_container = QWidget()
         ec_layout = QVBoxLayout(editor_container)
         ec_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Search Bar (Initially Hidden)
+        self.search_bar = QWidget()
+        self.search_bar.setVisible(False)
+        sb_layout = QHBoxLayout(self.search_bar)
+        sb_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search...")
+        self.search_input.textChanged.connect(self.highlight_matches)
+        self.search_input.returnPressed.connect(self.find_next)
+        
+        btn_next = QPushButton("↓")
+        btn_next.setFixedWidth(30)
+        btn_next.clicked.connect(self.find_next)
+        
+        btn_prev = QPushButton("↑")
+        btn_prev.setFixedWidth(30)
+        btn_prev.clicked.connect(self.find_prev)
+        
+        btn_close = QPushButton("×")
+        btn_close.setFixedWidth(30)
+        btn_close.clicked.connect(self.close_search)
+        
+        sb_layout.addWidget(self.search_input)
+        sb_layout.addWidget(btn_prev)
+        sb_layout.addWidget(btn_next)
+        sb_layout.addWidget(btn_close)
+        
+        ec_layout.addWidget(self.search_bar) # Add above editor label
+
         editor_label = QLabel("提示词编辑 (Prompts)")
         editor_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
         self.prompt_editor = QTextEdit()
         self.prompt_editor.textChanged.connect(self.on_prompt_edited) # Connect for realtime diff
         ec_layout.addWidget(editor_label)
         ec_layout.addWidget(self.prompt_editor)
+        
+        # Shortcut for Search
+        self.search_shortcut = QShortcut(QKeySequence("Ctrl+F"), self.prompt_editor)
+        self.search_shortcut.activated.connect(self.open_search)
 
-        # 3. Diff Viewer Container (NEW)
+        # 3. Diff Viewer Container
         diff_container = QWidget()
         dc_layout = QVBoxLayout(diff_container)
         dc_layout.setContentsMargins(0, 0, 0, 0)
@@ -439,6 +476,78 @@ class PromptManagerApp(QMainWindow):
         
         # Set initial sizes
         splitter.setSizes([200, 250, 450])
+
+    # --- Search Logic ---
+    
+    def open_search(self):
+        # Pre-fill search with selected text if any
+        cursor = self.prompt_editor.textCursor()
+        if cursor.hasSelection():
+            selected_text = cursor.selectedText()
+            self.search_input.setText(selected_text)
+
+        self.search_bar.setVisible(True)
+        self.search_input.setFocus()
+        self.search_input.selectAll()
+        self.highlight_matches()
+
+    def close_search(self):
+        self.search_bar.setVisible(False)
+        self.prompt_editor.setFocus()
+        # Clear highlights
+        self.prompt_editor.setExtraSelections([])
+
+    def highlight_matches(self):
+        search_text = self.search_input.text()
+        if not search_text:
+            self.prompt_editor.setExtraSelections([])
+            return
+            
+        extra_selections = []
+        
+        # Save current cursor
+        # original_cursor = self.prompt_editor.textCursor()
+        
+        # Start search from beginning
+        cursor = self.prompt_editor.textCursor()
+        cursor.movePosition(QTextCursor.Start)
+        
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor("#FFFF00")) # Yellow
+        fmt.setForeground(QColor("#000000"))
+        
+        while True:
+            # Find next occurrence
+            cursor = self.prompt_editor.document().find(search_text, cursor)
+            if cursor.isNull():
+                break
+                
+            sel = QTextEdit.ExtraSelection()
+            sel.format = fmt
+            sel.cursor = cursor
+            extra_selections.append(sel)
+            
+        self.prompt_editor.setExtraSelections(extra_selections)
+
+    def find_next(self):
+        text = self.search_input.text()
+        if not text: return
+        
+        found = self.prompt_editor.find(text)
+        if not found:
+            # Wrap around
+            self.prompt_editor.moveCursor(QTextCursor.Start)
+            self.prompt_editor.find(text)
+
+    def find_prev(self):
+        text = self.search_input.text()
+        if not text: return
+        
+        found = self.prompt_editor.find(text, QTextDocument.FindBackward)
+        if not found:
+            # Wrap around
+            self.prompt_editor.moveCursor(QTextCursor.End)
+            self.prompt_editor.find(text, QTextDocument.FindBackward)
 
     # --- Logic: Loading Data ---
 
@@ -594,6 +703,10 @@ class PromptManagerApp(QMainWindow):
         else:
             self.prompt_editor.clear()
         self.prompt_editor.blockSignals(False)
+        
+        # Re-apply highlight if search is active
+        if self.search_bar.isVisible():
+            self.highlight_matches()
 
     def read_tags_content(self, folder_path):
         """Helper to read tags without loading into editor"""
@@ -611,6 +724,9 @@ class PromptManagerApp(QMainWindow):
         item = self.node_list.currentItem()
         if item:
             self.update_diff_display(item)
+        # Update highlight
+        if self.search_bar.isVisible():
+            self.highlight_matches()
 
     def update_diff_display(self, current_item):
         """Calculates difference between current editor text and PREVIOUSLY SELECTED node's file text."""
