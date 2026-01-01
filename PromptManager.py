@@ -122,12 +122,12 @@ def clean_node_name(name):
 class RunParamsDialog(QDialog):
     """
     Dialog to edit key-value parameters before running.
-    Persists data to run_params.json.
+    Persists data to run_params.json with enabled state.
     """
     def __init__(self, params_file, parent=None):
         super().__init__(parent)
         self.setWindowTitle("运行参数配置 (Run Parameters)")
-        self.resize(500, 350)
+        self.resize(600, 350)
         self.params_file = params_file
         self.params_data = {}
         
@@ -137,9 +137,15 @@ class RunParamsDialog(QDialog):
         self.layout.addWidget(QLabel("设置传递给脚本的额外参数 (Key=Value):"))
         
         # Table
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["参数名 (Key)", "参数值 (Value)"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["启用 (Enable)", "参数名 (Key)", "参数值 (Value)"])
+        
+        # Adjust Header Sizing
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents) # Checkbox column
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        
         self.layout.addWidget(self.table)
         
         # Edit Buttons
@@ -165,8 +171,15 @@ class RunParamsDialog(QDialog):
     def add_row(self):
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem("Key"))
-        self.table.setItem(row, 1, QTableWidgetItem("Value"))
+        
+        # Checkbox Item
+        check_item = QTableWidgetItem()
+        check_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+        check_item.setCheckState(Qt.Checked) # Default enabled
+        self.table.setItem(row, 0, check_item)
+        
+        self.table.setItem(row, 1, QTableWidgetItem("Key"))
+        self.table.setItem(row, 2, QTableWidgetItem("Value"))
 
     def remove_row(self):
         current_row = self.table.currentRow()
@@ -177,22 +190,53 @@ class RunParamsDialog(QDialog):
         if os.path.exists(self.params_file):
             try:
                 with open(self.params_file, 'r', encoding='utf-8') as f:
-                    self.params_data = json.load(f)
+                    data = json.load(f)
+                    self.params_data = data
+                    
                     for k, v in self.params_data.items():
                         row = self.table.rowCount()
                         self.table.insertRow(row)
-                        self.table.setItem(row, 0, QTableWidgetItem(str(k)))
-                        self.table.setItem(row, 1, QTableWidgetItem(str(v)))
+                        
+                        # Determine value and enabled state
+                        # Support legacy format {k: v} and new format {k: {value: v, enabled: bool}}
+                        val_str = ""
+                        is_enabled = True
+                        
+                        if isinstance(v, dict) and 'value' in v:
+                            val_str = str(v['value'])
+                            is_enabled = v.get('enabled', True)
+                        else:
+                            val_str = str(v)
+                            is_enabled = True
+                        
+                        # Checkbox
+                        check_item = QTableWidgetItem()
+                        check_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                        check_item.setCheckState(Qt.Checked if is_enabled else Qt.Unchecked)
+                        self.table.setItem(row, 0, check_item)
+                        
+                        self.table.setItem(row, 1, QTableWidgetItem(str(k)))
+                        self.table.setItem(row, 2, QTableWidgetItem(val_str))
             except Exception as e:
                 print(f"Error loading params: {e}")
 
     def save_params(self):
         data = {}
         for i in range(self.table.rowCount()):
-            key_item = self.table.item(i, 0)
-            val_item = self.table.item(i, 1)
+            check_item = self.table.item(i, 0)
+            key_item = self.table.item(i, 1)
+            val_item = self.table.item(i, 2)
+            
             if key_item and val_item and key_item.text().strip():
-                data[key_item.text().strip()] = val_item.text().strip()
+                key = key_item.text().strip()
+                val = val_item.text().strip()
+                enabled = (check_item.checkState() == Qt.Checked)
+                
+                # New structure to support enabled state
+                data[key] = {
+                    "value": val,
+                    "enabled": enabled
+                }
         
         self.params_data = data
         try:
@@ -206,8 +250,17 @@ class RunParamsDialog(QDialog):
         super().accept()
         
     def get_params_list(self):
-        """Returns list of 'key=value' strings"""
-        return [f""" "--{k}%{v}" """ for k, v in self.params_data.items()]
+        """Returns list of 'key=value' strings for ENABLED items only"""
+        params_list = []
+        for k, v in self.params_data.items():
+            # Check if using new structure
+            if isinstance(v, dict) and 'value' in v:
+                if v.get('enabled', True):
+                    params_list.append(f"--{k}#{v['value']}")
+            else:
+                # Fallback for legacy structure in memory
+                params_list.append(f"--{k}#{v}")
+        return params_list
 
 class ClickableImageLabel(QLabel):
     """
@@ -1204,8 +1257,7 @@ class PromptManagerApp(QMainWindow):
             # 3. Construct Command
             # Command structure: script.bat "path1" "path2" "key=val" "key2=val2"
             cmd = [self.bat_script_path] + paths + extra_params
-            cmd = '  '.join(cmd)
-            print(f"Running command: {cmd}")
+            print(f"Running command: {'  '.join(cmd)}")
             try:
                 # Windows specific flag to open a new console window
                 creation_flags = 0
