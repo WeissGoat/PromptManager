@@ -7,6 +7,8 @@ import glob
 import tempfile
 import html
 import json
+import traceback
+import random 
 from pathlib import Path
 
 # PySide6 Imports
@@ -15,18 +17,22 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QListWidgetItem, QTextEdit, QLabel, QSplitter, 
                                QPushButton, QFileDialog, QMenu, QInputDialog, 
                                QMessageBox, QAbstractItemView, QFrame, QLineEdit, 
-                               QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem, QHeaderView)
-from PySide6.QtCore import Qt, QSize, QUrl, Signal, QPoint, QFile
+                               QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem, QHeaderView,
+                               QStyledItemDelegate, QStyleOptionViewItem)
+from PySide6.QtCore import Qt, QSize, QUrl, Signal, QPoint, QFile, QRunnable, QThreadPool, QObject, Slot, QRect
 from PySide6.QtGui import (QPixmap, QAction, QIcon, QDragEnterEvent, QDropEvent, 
                            QMouseEvent, QWheelEvent, QImageReader, QColor, QBrush,
-                           QShortcut, QKeySequence, QTextCursor, QTextDocument, QTextCharFormat)
+                           QShortcut, QKeySequence, QTextCursor, QTextDocument, QTextCharFormat, QPainter)
 
 # Windows Shortcut Handling
 try:
     import win32com.client
+    import pythoncom # Required for threading
     shell = win32com.client.Dispatch("WScript.Shell")
+    HAS_WIN32 = True
 except ImportError:
     shell = None
+    HAS_WIN32 = False
     print("Warning: pywin32 not installed. .lnk support will be limited.")
 
 # --- Helper Functions ---
@@ -117,13 +123,173 @@ def clean_node_name(name):
     # 2. ^\d+_    -> Starts with digits_
     return re.sub(r'^(\(\d+\)|\d+_)', '', name)
 
+def parse_tags_set(text):
+    if not text: return set()
+    clean = get_ori_prompt(text).replace('\n', ',')
+    return {t.strip() for t in clean.split(',') if t.strip()}
+
+def normalize_key(path):
+    return os.path.normcase(os.path.normpath(path))
+
+# --- Async Worker ---
+
+class WorkerSignals(QObject):
+    finished = Signal()
+    result = Signal(object) 
+
+class DiffCalculatorWorker(QRunnable):
+    def __init__(self, node_paths):
+        super(DiffCalculatorWorker, self).__init__()
+        self.node_paths = node_paths
+        self.signals = WorkerSignals()
+
+    @Slot()
+    def run(self):
+        print(f"[DiffWorker] Starting thread. Processing {len(self.node_paths)} nodes.")
+        
+        local_shell = None
+        if HAS_WIN32:
+            try:
+                pythoncom.CoInitialize()
+                local_shell = win32com.client.Dispatch("WScript.Shell")
+            except Exception as e:
+                print(f"[DiffWorker] COM Init Failed: {e}")
+
+        diff_map = {} 
+        previous_tags = set()
+        
+        try:
+            for i, path in enumerate(self.node_paths):
+                key = normalize_key(path)
+                resolved = path
+                path_obj = Path(path)
+                
+                if path_obj.suffix.lower() == '.lnk':
+                    if local_shell:
+                        try:
+                            shortcut = local_shell.CreateShortcut(str(path_obj.resolve()))
+                            target = shortcut.TargetPath
+                            if os.path.exists(target):
+                                resolved = target
+                        except:
+                            pass 
+                
+                tags_file = os.path.join(resolved, "tags.txt")
+                current_tags = set()
+                
+                if os.path.exists(tags_file):
+                    try:
+                        with open(tags_file, 'r', encoding='utf-8') as f:
+                            current_tags = parse_tags_set(f.read())
+                    except:
+                        pass
+                
+                if i == 0:
+                    diff_map[key] = (0, 0)
+                else:
+                    added = len(current_tags - previous_tags)
+                    removed = len(previous_tags - current_tags)
+                    diff_map[key] = (added, removed)
+                
+                previous_tags = current_tags
+        
+        except Exception as e:
+            print(f"[DiffWorker] Critical Error in run loop: {e}")
+            traceback.print_exc()
+        finally:
+            if HAS_WIN32:
+                try:
+                    pythoncom.CoUninitialize()
+                except:
+                    pass
+            
+        self.signals.result.emit(diff_map)
+        self.signals.finished.emit()
+
 # --- Custom Widgets ---
 
+class DiffDelegate(QStyledItemDelegate):
+    """
+    Custom delegate to paint diff stats.
+    """
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
+        # Default paint (Text, selection bg)
+        super().paint(painter, option, index)
+        
+        # Get Diff Data
+        diff_data = index.data(Qt.UserRole + 100) 
+        
+        if not diff_data:
+            return
+            
+        # FIX: Allow list or tuple (PySide might convert tuple to list)
+        if not isinstance(diff_data, (tuple, list)):
+            return
+            
+        added, removed = diff_data
+        
+        # Skip if nothing to show
+        if added == 0 and removed == 0:
+            return
+
+        rect = option.rect
+        painter.save()
+        
+        # Setup Font
+        font = option.font
+        font.setPointSize(max(8, font.pointSize() - 2)) 
+        font.setBold(True)
+        painter.setFont(font)
+        
+        # Prepare Text
+        text_added = f"+{added}" if added > 0 else ""
+        text_removed = f"-{removed}" if removed > 0 else ""
+        
+        # Metrics
+        fm = painter.fontMetrics()
+        
+        # Layout from Right Edge
+        padding = 8
+        spacing = 4
+        current_x = rect.right() - padding
+        
+        # Vertical centering
+        h = rect.height()
+        y_pos = rect.top()
+        
+        # Draw Function
+        def draw_pill(text, bg_col, txt_col):
+            nonlocal current_x
+            text_w = fm.horizontalAdvance(text)
+            pill_w = text_w + 10 # Padding inside pill
+            pill_h = min(16, h - 4) # Height limit
+            pill_y = y_pos + (h - pill_h) // 2
+            
+            pill_rect = QRect(current_x - pill_w, pill_y, pill_w, pill_h)
+            
+            # Draw BG
+            painter.setBrush(QBrush(bg_col))
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(pill_rect, 4, 4)
+            
+            # Draw Text
+            painter.setPen(txt_col)
+            painter.drawText(pill_rect, Qt.AlignCenter, text)
+            
+            # Move X pointer
+            current_x -= (pill_w + spacing)
+
+        # 1. Draw Removed (Red)
+        if text_removed:
+            draw_pill(text_removed, QColor("#FFEBEE"), QColor("#D32F2F"))
+
+        # 2. Draw Added (Green)
+        if text_added:
+            draw_pill(text_added, QColor("#E8F5E9"), QColor("#2E7D32"))
+
+        painter.restore()
+
 class RunParamsDialog(QDialog):
-    """
-    Dialog to edit key-value parameters before running.
-    Persists data to run_params.json with enabled state.
-    """
     def __init__(self, params_file, parent=None):
         super().__init__(parent)
         self.setWindowTitle("运行参数配置 (Run Parameters)")
@@ -192,29 +358,21 @@ class RunParamsDialog(QDialog):
                 with open(self.params_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self.params_data = data
-                    
                     for k, v in self.params_data.items():
                         row = self.table.rowCount()
                         self.table.insertRow(row)
-                        
-                        # Determine value and enabled state
-                        # Support legacy format {k: v} and new format {k: {value: v, enabled: bool}}
                         val_str = ""
                         is_enabled = True
-                        
                         if isinstance(v, dict) and 'value' in v:
                             val_str = str(v['value'])
                             is_enabled = v.get('enabled', True)
                         else:
                             val_str = str(v)
                             is_enabled = True
-                        
-                        # Checkbox
                         check_item = QTableWidgetItem()
                         check_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
                         check_item.setCheckState(Qt.Checked if is_enabled else Qt.Unchecked)
                         self.table.setItem(row, 0, check_item)
-                        
                         self.table.setItem(row, 1, QTableWidgetItem(str(k)))
                         self.table.setItem(row, 2, QTableWidgetItem(val_str))
             except Exception as e:
@@ -226,18 +384,11 @@ class RunParamsDialog(QDialog):
             check_item = self.table.item(i, 0)
             key_item = self.table.item(i, 1)
             val_item = self.table.item(i, 2)
-            
             if key_item and val_item and key_item.text().strip():
                 key = key_item.text().strip()
                 val = val_item.text().strip()
                 enabled = (check_item.checkState() == Qt.Checked)
-                
-                # New structure to support enabled state
-                data[key] = {
-                    "value": val,
-                    "enabled": enabled
-                }
-        
+                data[key] = {"value": val, "enabled": enabled}
         self.params_data = data
         try:
             with open(self.params_file, 'w', encoding='utf-8') as f:
@@ -250,15 +401,12 @@ class RunParamsDialog(QDialog):
         super().accept()
         
     def get_params_list(self):
-        """Returns list of 'key=value' strings for ENABLED items only"""
         params_list = []
         for k, v in self.params_data.items():
-            # Check if using new structure
             if isinstance(v, dict) and 'value' in v:
                 if v.get('enabled', True):
                     params_list.append(f"--{k}#{v['value']}")
             else:
-                # Fallback for legacy structure in memory
                 params_list.append(f"--{k}#{v}")
         return params_list
 
@@ -271,7 +419,7 @@ class ClickableImageLabel(QLabel):
     """
     clicked = Signal()
     right_clicked = Signal()
-    scrolled = Signal(int) # +1 or -1
+    scrolled = Signal(int) 
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -290,17 +438,13 @@ class ClickableImageLabel(QLabel):
     def wheelEvent(self, event: QWheelEvent):
         delta = event.angleDelta().y()
         if delta > 0:
-            self.scrolled.emit(-1) # Previous image
+            self.scrolled.emit(-1)
         else:
-            self.scrolled.emit(1)  # Next image
+            self.scrolled.emit(1)
         super().wheelEvent(event)
 
 class DraggableListWidget(QListWidget):
-    """
-    Action Node List.
-    Supports internal reordering and external dragging to Tree.
-    """
-    item_moved = Signal() # Signal when internal reorder happens
+    item_moved = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -308,15 +452,13 @@ class DraggableListWidget(QListWidget):
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setSpacing(2) 
         
     def dropEvent(self, event: QDropEvent):
-        # Default internal move behavior
         super().dropEvent(event)
         self.item_moved.emit()
 
     def startDrag(self, supportedActions):
-        # When dragging, we want to allow moving internally, 
-        # but also copying to other widgets (the scene tree)
         super().startDrag(Qt.MoveAction | Qt.CopyAction)
 
 # --- Main Application ---
@@ -334,6 +476,7 @@ class PromptManagerApp(QMainWindow):
         self.previous_node_path = None # Track last selected node for diff
         self.scene_selection_history = {} # {scene_path: selected_row_index}
         self.bat_script_path = r"C:\Users\WhiteSheep\AppData\Roaming\Microsoft\Windows\SendTo\ct.blackboard.run_next_character.bat" # Store selected bat script path
+        self.threadpool = QThreadPool()
         
         # Bookmarks State
         self.bookmarks = set()
@@ -398,6 +541,9 @@ class PromptManagerApp(QMainWindow):
         self.node_list.item_moved.connect(self.on_node_reordered)
         self.node_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.node_list.customContextMenuRequested.connect(self.show_node_context_menu)
+        
+        # Set Delegate
+        self.node_list.setItemDelegate(DiffDelegate(self.node_list))
 
         mid_layout.addWidget(mid_label)
         mid_layout.addWidget(self.node_list)
@@ -709,14 +855,37 @@ class PromptManagerApp(QMainWindow):
                             items.append(entry.name)
         except OSError:
             pass
-        
-        # Sort using natural sort (handles (1), (2), (10) correctly)
         items.sort(key=natural_sort_key)
-
-        for name in items:
+        
+        paths_to_diff = []
+        for i, name in enumerate(items):
             item = QListWidgetItem(name)
-            item.setData(Qt.UserRole, os.path.join(scene_path, name))
+            full_path = os.path.join(scene_path, name)
+            item.setData(Qt.UserRole, full_path)
+            
+            # Remove MOCK DATA
+            # mock_diff = (5, 2) 
+            # item.setData(Qt.UserRole + 100, mock_diff) 
+            
             self.node_list.addItem(item)
+            paths_to_diff.append(os.path.normpath(full_path))
+            
+        if paths_to_diff:
+            worker = DiffCalculatorWorker(paths_to_diff)
+            worker.signals.result.connect(self.on_diff_calculated)
+            self.threadpool.start(worker)
+
+    def on_diff_calculated(self, diff_map):
+        # print(f"Main: Received diff results. Count: {len(diff_map)}")
+        updated_count = 0
+        for i in range(self.node_list.count()):
+            item = self.node_list.item(i)
+            path = normalize_key(item.data(Qt.UserRole))
+            if path in diff_map:
+                item.setData(Qt.UserRole + 100, diff_map[path])
+                updated_count += 1
+        # print(f"Main: Updated {updated_count} items with real diff data.")
+        self.node_list.viewport().update()
 
     def on_node_selected(self, item):
         if not item: return
@@ -773,17 +942,20 @@ class PromptManagerApp(QMainWindow):
         return ""
 
     def on_prompt_edited(self):
-        """Called when user types in prompt editor. Updates diff in real-time."""
         item = self.node_list.currentItem()
         if item:
             self.update_diff_display(item)
-        # Update highlight
         if self.search_bar.isVisible():
             self.highlight_matches()
+            
+    def update_list_diff_for_current_item(self):
+        if self.current_scene_path:
+            paths = [os.path.normpath(self.node_list.item(i).data(Qt.UserRole)) for i in range(self.node_list.count())]
+            worker = DiffCalculatorWorker(paths)
+            worker.signals.result.connect(self.on_diff_calculated)
+            self.threadpool.start(worker)
 
     def update_diff_display(self, current_item):
-        """Calculates difference between current editor text and PREVIOUSLY SELECTED node's file text."""
-        
         if not self.previous_node_path:
             self.diff_viewer.clear()
             self.diff_viewer.setPlaceholderText("无上一次选中记录 (No previous selection)")
@@ -1021,6 +1193,7 @@ class PromptManagerApp(QMainWindow):
             with open(tag_file, 'w', encoding='utf-8') as f:
                 f.write(self.prompt_editor.toPlainText())
             QMessageBox.information(self, "Success", "提示词已保存")
+            self.update_list_diff_for_current_item()
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
@@ -1079,9 +1252,7 @@ class PromptManagerApp(QMainWindow):
                     item.setData(Qt.UserRole, new_full_path)
                 except Exception as e:
                     print(f"Rename failed: {e}")
-        
-        # Refresh to be safe
-        # self.load_nodes_for_scene(self.current_scene_path) 
+        self.update_list_diff_for_current_item()
 
     # --- Logic: Cross-Scene Linking (Drag to Tree) ---
 
@@ -1357,6 +1528,7 @@ class PromptManagerApp(QMainWindow):
         
         # 2. Sort the list widget items alphabetically
         self.node_list.sortItems(Qt.AscendingOrder)
+        self.update_list_diff_for_current_item()
 
     def delete_selected_nodes(self):
         items = self.node_list.selectedItems()
@@ -1375,6 +1547,7 @@ class PromptManagerApp(QMainWindow):
                     self.node_list.takeItem(row)
                 else:
                     print(f"Failed to delete {path}")
+            self.update_list_diff_for_current_item()
 
 # --- Entry Point ---
 from PySide6.QtWidgets import QTreeWidgetItemIterator # Added specific import needed later
