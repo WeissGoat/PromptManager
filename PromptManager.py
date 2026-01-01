@@ -207,7 +207,7 @@ class RunParamsDialog(QDialog):
         
     def get_params_list(self):
         """Returns list of 'key=value' strings"""
-        return [f"--{k}%{v}" for k, v in self.params_data.items()]
+        return [f""" "--{k}%{v}" """ for k, v in self.params_data.items()]
 
 class ClickableImageLabel(QLabel):
     """
@@ -1180,7 +1180,7 @@ class PromptManagerApp(QMainWindow):
         Run with dialog to add extra params.
         """
         items = self.node_list.selectedItems()
-        paths = [resolve_path(item.data(Qt.UserRole)) for item in items]
+        paths = [item.data(Qt.UserRole) for item in items]
         
         if not paths:
             # Fallback if no specific node selected? Maybe run current scene context?
@@ -1204,7 +1204,8 @@ class PromptManagerApp(QMainWindow):
             # 3. Construct Command
             # Command structure: script.bat "path1" "path2" "key=val" "key2=val2"
             cmd = [self.bat_script_path] + paths + extra_params
-            
+            cmd = '  '.join(cmd)
+            print(f"Running command: {cmd}")
             try:
                 # Windows specific flag to open a new console window
                 creation_flags = 0
@@ -1265,11 +1266,44 @@ class PromptManagerApp(QMainWindow):
         
         menu.addSeparator()
         
+        reset_sort_act = QAction("重置排序 (Reset Sorting)", self)
+        reset_sort_act.triggered.connect(self.reset_node_sorting)
+        menu.addAction(reset_sort_act)
+        
+        menu.addSeparator()
+        
         del_act = QAction("删除 (移至回收站)", self)
         del_act.triggered.connect(self.delete_selected_nodes)
         menu.addAction(del_act)
         
         menu.exec(self.node_list.mapToGlobal(pos))
+
+    def reset_node_sorting(self):
+        if not self.current_scene_path: return
+        
+        # confirm
+        if QMessageBox.question(self, "确认", "确定要移除所有序号并重置排序吗?", QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+
+        # 1. Rename all folders to remove prefixes
+        for i in range(self.node_list.count()):
+            item = self.node_list.item(i)
+            current_full_path = item.data(Qt.UserRole)
+            current_name = os.path.basename(current_full_path)
+            
+            pure_name = clean_node_name(current_name)
+            
+            if pure_name != current_name:
+                new_full_path = os.path.join(self.current_scene_path, pure_name)
+                try:
+                    os.rename(current_full_path, new_full_path)
+                    item.setText(pure_name)
+                    item.setData(Qt.UserRole, new_full_path)
+                except Exception as e:
+                    print(f"Error renaming {current_name} to {pure_name}: {e}")
+        
+        # 2. Sort the list widget items alphabetically
+        self.node_list.sortItems(Qt.AscendingOrder)
 
     def delete_selected_nodes(self):
         items = self.node_list.selectedItems()
