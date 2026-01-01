@@ -1201,6 +1201,7 @@ class PromptManagerApp(QMainWindow):
         if ok and text:
             # key = ','.join(text.split(',')[:2])
             # value = ','.join(text.split(',')[2:])
+            prefix = text.split(',')[0]
 
             key = f"tag_node,{os.path.basename(self.current_scene_path)}"
             value = text
@@ -1222,7 +1223,7 @@ class PromptManagerApp(QMainWindow):
                 #     f.write(content)
 
 
-                reset_ainode_ext_node_type(path, key, f"{key},{value}")
+                reset_ainode_ext_node_type(path, f"{key},{prefix}", f"{key},{value}")
             QMessageBox.information(self, "Success", f"key:{key} item:{value} 编辑成功")
             # Refresh current view if needed
             if self.node_list.currentItem() in items:
@@ -1363,8 +1364,11 @@ class PromptManagerApp(QMainWindow):
         
         confirm = QMessageBox.question(self, "确认删除", f"确定要将这 {len(items)} 个节点移至回收站吗?", QMessageBox.Yes | QMessageBox.No)
         if confirm == QMessageBox.Yes:
+            bakup_path = os.path.join(self.current_scene_path, "stash")
+            os.makedirs(bakup_path, exist_ok=True)
             for item in items:
                 path = item.data(Qt.UserRole) # Use direct path (lnk or folder)
+                shutil.copy(path, bakup_path)
                 if QFile.moveToTrash(path):
                     # Remove from list
                     row = self.node_list.row(item)
