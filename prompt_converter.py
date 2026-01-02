@@ -6,7 +6,7 @@ import html
 import time
 import shutil
 from datetime import datetime
-# 引入 queue 用于线程安全队列 (虽然 Python 的 list 在某些操作下原子，但标准队列更稳健，这里我们用简单的 list + mutex 配合)
+# 引入 queue 用于线程安全队列
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QLabel, QPushButton, 
                                QListWidget, QListWidgetItem, QFileDialog, 
@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QTabWidget, QProgressBar, QMessageBox, QLineEdit, 
                                QGridLayout, QStyle, QInputDialog, QMenu, QLayout)
 from PySide6.QtCore import Qt, Signal, QTimer, QSize, QThread, QObject, QMutex, QWaitCondition, QRect, QPoint
-from PySide6.QtGui import QColor, QPalette, QFont, QAction
+from PySide6.QtGui import QColor, QPalette, QFont, QAction, QPixmap
 from util import resolve_path, create_shortcut
 
 # --- API Import Setup ---
@@ -134,49 +134,71 @@ class PromptItem:
         self.is_image = is_image
         self.image_path = image_path
         self.parsed_tags = [] 
-        self.is_deleted = False # 增加标记，用于通知后台线程该任务已失效
+        self.is_deleted = False 
+        self.status = "ready" # pending, ready, analyzing
         
+        # 如果 raw_text 为空 (例如刚导入图片还没反推)，不进行分割
+        if self.raw_text:
+            self.parse_tags()
+        else:
+            self.status = "pending"
+
+    def parse_tags(self):
+        """解析 raw_text 到 parsed_tags"""
+        self.parsed_tags = []
         raw_tags = [t.strip() for t in self.raw_text.split(',') if t.strip()]
         for t in raw_tags:
             self.parsed_tags.append({
                 'text': t, 
-                'category': 'Pending', 
+                'category': 'Pending', # 默认为 Pending，等待后台分类
                 'enabled': True,
                 'translation': None 
             })
+        self.status = "ready"
 
 # --- Workers (Async) ---
 
 class ImageBatchWorker(QThread):
     """
-    负责耗时的图片反推和初步生成 Item 对象
+    负责耗时的图片反推
+    修改：只负责 image_to_prompt，不再负责分类，以加快反推速度
     """
     progress_signal = Signal(int, int)
-    item_ready_signal = Signal(object)
+    item_updated_signal = Signal(object) # 发送更新后的 Item 对象
     finished_signal = Signal()
     log_signal = Signal(str)
 
-    def __init__(self, file_paths, parent=None):
+    def __init__(self, items, parent=None):
         super().__init__(parent)
-        self.file_paths = file_paths
+        self.items_to_process = items
         self.is_running = True
 
     def run(self):
-        total = len(self.file_paths)
-        for i, path in enumerate(self.file_paths):
+        total = len(self.items_to_process)
+        for i, item in enumerate(self.items_to_process):
             if not self.is_running: break
+            if item.is_deleted: continue # 跳过已删除的
+
             try:
-                prompt = api.image_to_prompt(path)
-                base_name = os.path.splitext(os.path.basename(path))[0]
-                item = PromptItem(base_name, prompt, is_image=True, image_path=path)
-                # 预分类 (可选，也可以交给 GlobalWorker，但这里做一部分可以分担压力)
-                for tag_data in item.parsed_tags:
-                    tag_data['category'] = api.classify_tag(tag_data['text'])
+                # 状态标记为分析中
+                item.status = "analyzing"
                 
-                self.item_ready_signal.emit(item)
+                # 调用耗时接口 (只做这一件事，做完就通知)
+                prompt = api.image_to_prompt(item.image_path)
+                
+                # 更新 Item 数据
+                item.raw_text = prompt
+                item.parse_tags() # 解析标签 (此时 Category 全是 Pending)
+                
+                # 移除这里的分类代码，放到 GlobalTranslationWorker 去做
+                
+                # 完成，通知 UI，UI 会把它丢给 GlobalWorker 去分类和翻译
+                self.item_updated_signal.emit(item)
                 self.progress_signal.emit(i + 1, total)
             except Exception as e:
-                self.log_signal.emit(f"Error: {str(e)}")
+                self.log_signal.emit(f"Error processing {item.name}: {str(e)}")
+                item.status = "error"
+        
         self.finished_signal.emit()
 
     def stop(self):
@@ -185,36 +207,33 @@ class ImageBatchWorker(QThread):
 class GlobalTranslationWorker(QThread):
     """
     全局后台翻译线程。
-    一直运行，自动处理队列中的 Item。支持“插队”（优先处理当前选中的 Item）。
+    一直运行，自动处理队列中的 Item。支持“插队”。
+    同时负责补全 Pending 状态的分类。
     """
-    # 信号: Item对象, Tag索引, 翻译结果, 分类结果
     tag_processed = Signal(object, int, str, str) 
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.queue = [] # 待处理的 Item 列表
-        self.priority_item = None # 当前优先处理的 Item
+        self.queue = [] 
+        self.priority_item = None 
         self.is_running = True
         self.mutex = QMutex()
         self.cond = QWaitCondition()
 
     def add_item(self, item):
-        """添加新任务到队列"""
         self.mutex.lock()
         if item not in self.queue:
             self.queue.append(item)
-        self.cond.wakeAll() # 唤醒线程
+        self.cond.wakeAll() 
         self.mutex.unlock()
 
     def set_priority(self, item):
-        """设置高优先级任务（通常是用户当前点击的任务）"""
         self.mutex.lock()
         self.priority_item = item
-        self.cond.wakeAll() # 唤醒线程以防它正在睡觉
+        self.cond.wakeAll() 
         self.mutex.unlock()
 
     def remove_item(self, item):
-        """从队列中移除任务（如果存在）"""
         self.mutex.lock()
         if item in self.queue:
             self.queue.remove(item)
@@ -223,7 +242,6 @@ class GlobalTranslationWorker(QThread):
         self.mutex.unlock()
 
     def clear_queue(self):
-        """清空所有待处理任务"""
         self.mutex.lock()
         self.queue.clear()
         self.priority_item = None
@@ -238,11 +256,9 @@ class GlobalTranslationWorker(QThread):
     def run(self):
         while self.is_running:
             self.mutex.lock()
-            # 如果没有任务且没有优先任务，就睡觉等待
             if not self.queue and not self.priority_item:
                 self.cond.wait(self.mutex)
             
-            # 决定处理哪个 Item
             target_item = None
             if self.priority_item:
                 target_item = self.priority_item
@@ -254,70 +270,61 @@ class GlobalTranslationWorker(QThread):
             if not self.is_running: break
             if not target_item: continue
 
-            # 核心检查：如果该 Item 已经被标记为删除，跳过所有处理，直接清理
             if target_item.is_deleted:
                 self.mutex.lock()
-                if target_item in self.queue:
-                    self.queue.remove(target_item)
-                if target_item == self.priority_item:
-                    self.priority_item = None
+                if target_item in self.queue: self.queue.remove(target_item)
+                if target_item == self.priority_item: self.priority_item = None
                 self.mutex.unlock()
                 continue
 
-            # 开始处理该 Item 的标签
             processed_something = False
             
-            # 遍历标签
-            for i, tag_data in enumerate(target_item.parsed_tags):
+            # 使用 list() 创建副本进行遍历，防止主线程修改 list (如分割标签) 导致 crash
+            tags_copy = list(target_item.parsed_tags)
+            
+            for i, tag_data in enumerate(tags_copy):
                 if not self.is_running: break
-                
-                # 再次检查删除标记：如果在处理过程中被用户删除了，立即停止
-                if target_item.is_deleted:
-                    break
+                if target_item.is_deleted: break
+                if self.priority_item and target_item != self.priority_item: break 
 
-                # 如果我们在处理普通队列时，用户突然插队设置了 priority_item
-                # 我们应该尽快切换 (除非 target 就是 priority)
-                if self.priority_item and target_item != self.priority_item:
-                    break 
-
-                if tag_data.get('translation') is None:
-                    # 执行翻译 (耗时操作)
+                # 检查翻译，同时也检查分类是否为 Pending
+                if tag_data.get('translation') is None or tag_data.get('category') == 'Pending':
                     text = tag_data['text']
-                    trans = api.translate_tag(text)
+                    
+                    # 补充分类 (如果需要)
                     cat = tag_data['category']
                     if cat == 'Pending':
                         cat = api.classify_tag(text)
                     
-                    # 更新数据
+                    # 补充翻译 (如果需要)
+                    trans = tag_data.get('translation')
+                    if trans is None:
+                        trans = api.translate_tag(text)
+                    
                     tag_data['translation'] = trans
                     tag_data['category'] = cat
                     
-                    # 发送信号更新 UI
                     self.tag_processed.emit(target_item, i, trans, cat)
                     processed_something = True
                     
                     if not HAS_TRANSLATOR:
                         QThread.msleep(5)
 
-            # 再次检查该 Item 是否全部完成
             self.mutex.lock()
-            # 重新扫描是否有漏网之鱼 (防止多线程并发修改导致的状态不一致)
-            is_fully_done = all(t.get('translation') is not None for t in target_item.parsed_tags)
+            # 检查是否全部完成 (既有翻译，分类也不是 Pending)
+            # 注意：这里需要检查原始 list，因为可能有新加的
+            is_fully_done = all(t.get('translation') is not None and t.get('category') != 'Pending' for t in target_item.parsed_tags)
             
-            # 再次检查删除，防止竞态条件
             if target_item.is_deleted:
                 if target_item in self.queue: self.queue.remove(target_item)
                 if target_item == self.priority_item: self.priority_item = None
             elif is_fully_done:
-                if target_item in self.queue:
-                    self.queue.remove(target_item)
-                if target_item == self.priority_item:
-                    self.priority_item = None # 优先任务完成，回归正常队列
+                if target_item in self.queue: self.queue.remove(target_item)
+                if target_item == self.priority_item: self.priority_item = None
             
             self.mutex.unlock()
 
             if not processed_something and is_fully_done:
-                # 避免死循环占用 CPU (如果队列里都是已完成的项目)
                 QThread.msleep(50)
 
 class SingleTagWorker(QThread):
@@ -332,7 +339,7 @@ class SingleTagWorker(QThread):
         trans = api.translate_tag(self.text)
         self.result_signal.emit(self.text, trans, cat)
 
-# --- Custom Widgets (TagChip, FlowLayout 等保持不变) ---
+# --- Custom Widgets ---
 
 class TagChip(QLabel):
     toggled = Signal(bool)
@@ -353,6 +360,15 @@ class TagChip(QLabel):
         self.setAlignment(Qt.AlignCenter)
         self.setCursor(Qt.PointingHandCursor)
         self.setWordWrap(False)
+        
+        # 启用自定义右键菜单策略
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        
+        # 定时器用于区分单击和双击
+        self.click_timer = QTimer(self)
+        self.click_timer.setSingleShot(True)
+        self.click_timer.setInterval(220) # 延迟220ms以检测双击
+        self.click_timer.timeout.connect(self._perform_toggle)
         
         self.update_content()
         self.update_style()
@@ -389,17 +405,26 @@ class TagChip(QLabel):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.is_active = not self.is_active
-            self.update_style()
-            self.toggled.emit(self.is_active)
+            # 启动定时器，延迟触发切换
+            self.click_timer.start()
+        # 右键事件由 CustomContextMenu 处理
     
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
+            # 停止单击定时器，避免触发切换
+            self.click_timer.stop()
+            
             text, ok = QInputDialog.getText(self, "编辑提示词", "修改提示词内容:", text=self.full_text)
             if ok and text:
                 if text != self.full_text:
                     self.set_loading_state()
                     self.edited.emit(text)
+
+    def _perform_toggle(self):
+        """实际执行切换逻辑"""
+        self.is_active = not self.is_active
+        self.update_style()
+        self.toggled.emit(self.is_active)
 
     def set_active_by_filter(self, active):
         if self.is_active != active:
@@ -499,7 +524,7 @@ class FlowLayoutWidget(QWidget):
 class PromptConverterApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AI 提示词转换与筛选工具 (全局后台翻译版)")
+        self.setWindowTitle("AI 提示词转换与筛选工具 (预览 + 极速导入 + 右键分类)")
         self.resize(1300, 800)
 
         self.items = [] 
@@ -510,10 +535,10 @@ class PromptConverterApp(QMainWindow):
         self.running_threads = [] 
         self.img_worker = None
 
-        # --- 核心改动：初始化全局后台 Worker ---
+        # --- 初始化全局后台 Worker ---
         self.global_worker = GlobalTranslationWorker()
         self.global_worker.tag_processed.connect(self.on_global_worker_update)
-        self.global_worker.start() # 启动后一直运行，等待任务
+        self.global_worker.start() 
         # -----------------------------------
 
         self.init_ui()
@@ -531,12 +556,10 @@ class PromptConverterApp(QMainWindow):
         thread.deleteLater()
 
     def closeEvent(self, event):
-        # 停止全局 Worker
         if self.global_worker:
             self.global_worker.stop()
             self.global_worker.wait(500)
         
-        # 停止临时线程
         for t in self.running_threads:
             if hasattr(t, 'stop'): t.stop()
             t.quit()
@@ -640,6 +663,23 @@ class PromptConverterApp(QMainWindow):
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         
+        # === 图片预览区域 ===
+        self.preview_container = QWidget()
+        self.preview_container.setVisible(False) # 默认隐藏
+        self.preview_container.setFixedHeight(220) # 固定高度区域
+        
+        preview_layout = QVBoxLayout(self.preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 10)
+        preview_layout.addWidget(QLabel("图片预览:"))
+        
+        self.lbl_image_preview = QLabel()
+        self.lbl_image_preview.setAlignment(Qt.AlignCenter)
+        self.lbl_image_preview.setStyleSheet("background-color: #f0f0f0; border: 1px dashed #ccc; border-radius: 5px;")
+        preview_layout.addWidget(self.lbl_image_preview)
+        
+        right_layout.addWidget(self.preview_container)
+        # ==========================
+        
         filter_group = QFrame()
         f_layout = QVBoxLayout(filter_group)
         f_layout.addWidget(QLabel("分类筛选"))
@@ -711,9 +751,24 @@ class PromptConverterApp(QMainWindow):
         self.img_status_label.setText("正在后台分析图片...")
         self.input_tabs.setTabEnabled(0, False)
         
-        self.img_worker = ImageBatchWorker(files)
+        # --- 核心修改：立即创建 Item，并传递给 Worker ---
+        new_items = []
+        for path in files:
+            base_name = os.path.splitext(os.path.basename(path))[0]
+            name = self.generate_unique_name(base_name)
+            
+            # 创建空 PromptItem (raw_text="", status="pending")
+            item = PromptItem(name, "", is_image=True, image_path=path)
+            self.items.append(item)
+            new_items.append(item)
+            
+            # 立即显示在列表中
+            self.item_list_widget.addItem(f"{item.name} [等待分析...]")
+        
+        # 启动 Worker，处理这些已存在的 Item
+        self.img_worker = ImageBatchWorker(new_items)
         self.img_worker.progress_signal.connect(self.on_import_progress)
-        self.img_worker.item_ready_signal.connect(self.on_import_item_ready)
+        self.img_worker.item_updated_signal.connect(self.on_single_image_processed) # 每处理完一张触发
         self.img_worker.log_signal.connect(print)
         self.img_worker.finished_signal.connect(self.on_import_finished)
         
@@ -723,32 +778,60 @@ class PromptConverterApp(QMainWindow):
         self.img_progress.setValue(c)
         self.img_status_label.setText(f"处理中: {c}/{t}")
 
-    def on_import_item_ready(self, item):
-        item.name = self.generate_unique_name(item.name)
-        self.items.append(item)
-        self.item_list_widget.addItem(f"{item.name} [IMG]")
+    def on_single_image_processed(self, item):
+        """当单张图片在后台分析完成后调用"""
+        # 更新列表中的显示文本
+        try:
+            row = self.items.index(item)
+            list_item = self.item_list_widget.item(row)
+            if list_item:
+                list_item.setText(f"{item.name} [IMG]")
+        except ValueError:
+            pass # Item 可能被删除了
+        
+        # 刷新筛选器 (因为可能有新分类出现)
         self.update_filters()
         
-        # 核心：图片生成Item后，立即加入后台翻译队列
+        # 核心：加入翻译队列，让 GlobalTranslationWorker 去处理分类和翻译
         self.global_worker.add_item(item)
+
+        # 如果当前正选中这个项目，刷新详情页
+        if self.current_item_index >= 0 and self.current_item_index < len(self.items):
+             if self.items[self.current_item_index] == item:
+                 self.load_item_details(self.current_item_index)
 
     def on_import_finished(self):
         self.img_progress.setVisible(False)
-        self.img_status_label.setText("导入完成，翻译线程正在后台运行")
+        self.img_status_label.setText("所有图片分析完成")
         self.input_tabs.setTabEnabled(0, True)
 
     def load_item_details(self, row):
-        """
-        切换列表项时，不再启动新翻译线程，而是告诉全局线程：我想优先看这个！
-        """
         if row < 0 or row >= len(self.items): return
         
         self.current_item_index = row
         item = self.items[row]
         self.lbl_current_info.setText(f"当前编辑: {item.name}")
+
+        # === 图片预览逻辑 ===
+        if item.is_image and item.image_path and os.path.exists(item.image_path):
+            self.preview_container.setVisible(True)
+            pixmap = QPixmap(item.image_path)
+            if not pixmap.isNull():
+                scaled_pixmap = pixmap.scaled(self.lbl_image_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.lbl_image_preview.setPixmap(scaled_pixmap)
+            else:
+                self.lbl_image_preview.setText("无法加载图片")
+        else:
+            self.preview_container.setVisible(False)
+        # ====================
         
-        # 1. 渲染当前已有数据 (可能部分已翻译，部分未翻译)
         self.flow_widget.clear_chips()
+
+        # 处理未分析完成的情况
+        if item.status == "pending" or item.status == "analyzing":
+            self.flow_widget.layout_container.addWidget(QLabel("⏳ 正在分析图片提示词，请稍候...", alignment=Qt.AlignCenter))
+            return
+        
         for i, tag_data in enumerate(item.parsed_tags):
             cat = tag_data.get('category', 'Unknown')
             color = api.get_color_for_category(cat) if cat != 'Pending' else "#eee"
@@ -756,6 +839,11 @@ class PromptConverterApp(QMainWindow):
             
             chip = self.flow_widget.add_chip(tag_data['text'], trans, cat, color)
             chip.set_translation_mode(self.cb_translate.isChecked())
+            
+            # --- 绑定右键菜单 ---
+            # 连接右键信号到主程序的处理函数
+            chip.customContextMenuRequested.connect(lambda pos, c=chip, td=tag_data: self.show_tag_context_menu(pos, c, td))
+            # ------------------
             
             is_enabled = tag_data.get('enabled', True)
             if not self.category_filters.get(cat, True) and cat != 'Pending':
@@ -771,6 +859,57 @@ class PromptConverterApp(QMainWindow):
 
         # 2. 告诉全局线程插队
         self.global_worker.set_priority(item)
+
+    # --- 右键菜单功能 ---
+    def show_tag_context_menu(self, pos, chip, tag_data):
+        menu = QMenu(self)
+        
+        known_cats = self.category_filters.keys()
+        
+        # 2. 添加分类选项
+        for cat in sorted(known_cats):
+            act = QAction(cat, self)
+            # 如果是当前分类，标记一下（或者禁用）
+            if cat == tag_data['category']:
+                act.setCheckable(True)
+                act.setChecked(True)
+                act.setEnabled(False)
+            
+            # 连接槽函数
+            act.triggered.connect(lambda checked, c=cat: self.change_tag_category(tag_data, chip, c))
+            menu.addAction(act)
+            
+        menu.addSeparator()
+        
+        # 3. 添加新增分类选项
+        new_cat_act = QAction("(+) 新增分类...", self)
+        new_cat_act.triggered.connect(lambda: self.add_new_category_dialog(tag_data, chip))
+        menu.addAction(new_cat_act)
+        
+        # 4. 显示菜单
+        menu.exec(chip.mapToGlobal(pos))
+
+    def change_tag_category(self, tag_data, chip, new_category):
+        tag_data['category'] = new_category
+        
+        # 更新颜色
+        color = api.get_color_for_category(new_category)
+        
+        # 更新 UI
+        chip.update_data(tag_data['translation'], new_category, color)
+        
+        # 更新筛选列表（如果这是个新分类）
+        if new_category not in self.category_filters:
+            self.update_filters()
+            
+    def add_new_category_dialog(self, tag_data, chip):
+        text, ok = QInputDialog.getText(self, "新增分类", "请输入新分类名称:")
+        if ok and text:
+            # 清理输入
+            new_cat = text.strip()
+            if new_cat:
+                self.change_tag_category(tag_data, chip, new_cat)
+    # -------------------
 
     def on_global_worker_update(self, item_obj, tag_index, translation, category):
         """
@@ -794,6 +933,49 @@ class PromptConverterApp(QMainWindow):
                     self.update_filters()
 
     def on_chip_edited(self, tag_data, new_text, chip_widget):
+        # 检查是否包含分割符
+        if ',' in new_text or '，' in new_text:
+            # 1. 分割文本
+            parts = re.split(r'[,，]', new_text)
+            parts = [p.strip() for p in parts if p.strip()]
+            
+            if not parts: return # 分割后为空
+            
+            # 2. 获取当前操作的 Item
+            if self.current_item_index < 0: return
+            item = self.items[self.current_item_index]
+            
+            # 3. 找到原有 tag 的位置
+            try:
+                idx = item.parsed_tags.index(tag_data)
+            except ValueError:
+                return # 找不到数据，可能已被修改
+                
+            # 4. 构建新标签列表
+            new_tags_data = []
+            for p in parts:
+                new_tags_data.append({
+                    'text': p, 
+                    # 关键：新分割出来的 Tag 分类设为 Pending，触发后台重新分类
+                    'category': 'Pending', 
+                    'enabled': tag_data.get('enabled', True), # 保持原有启用状态
+                    'translation': None 
+                })
+                
+            # 5. 替换：删除旧的，插入新的
+            # 使用切片替换将新标签插入到原有位置
+            item.parsed_tags[idx:idx+1] = new_tags_data
+            
+            # 6. 刷新界面 (重新加载详情)
+            self.load_item_details(self.current_item_index)
+            
+            # 7. 确保新标签被后台处理 (加入优先队列)
+            self.global_worker.add_item(item)
+            self.global_worker.set_priority(item)
+            
+            return
+
+        # 如果没有逗号，执行原有的单标签更新逻辑
         tag_data['text'] = new_text
         # 编辑单个标签还是用临时线程，为了极速响应
         worker = SingleTagWorker(new_text, self)
@@ -946,10 +1128,6 @@ class PromptConverterApp(QMainWindow):
             self.lbl_current_info.setText("列表为空")
             self.current_item_index = -1
         else:
-            # 如果删除的是当前显示的，或者删除导致索引变化，需要刷新一下
-            # 简单起见，如果列表不为空，手动触发一下 currentItemChanged 对应的逻辑可能更好，
-            # 但因为 pop 后 currentRow 会自动变（或变成-1），Qt 会发送信号。
-            # 这里我们手动处理一下 current_item_index 的边界情况
             if self.current_item_index == row:
                 self.flow_widget.clear_chips()
                 self.lbl_current_info.setText("请选择列表项")
