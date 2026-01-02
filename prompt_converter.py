@@ -17,6 +17,7 @@ from PySide6.QtGui import QColor, QPalette, QFont, QAction
 sys.path.append(r"F:\ThreeState")
 
 import danbooru_api
+from translation import translate
 
 class MockAIInterface:
     """
@@ -58,14 +59,14 @@ class MockAIInterface:
         clean_tag = re.sub(r'[\(\)\[\]\{\}]', '', tag_text).strip().lower()
         
         # 1. 查表
-        if clean_tag in self.known_categories:
-            cat = self.known_categories[clean_tag]
-        else:
-            # 2. 模拟：随机分配一个类型用于演示
-            # 实际中你会调用你的分类模型
-            cats = ["Attribute", "Object", "Effect", "Unknown", "Artist"]
-            # 为了演示一致性，根据字符长度hash一下
-            cat = cats[len(clean_tag) % len(cats)]
+        # if clean_tag in self.known_categories:
+        #     cat = self.known_categories[clean_tag]
+        # else:
+        #     # 2. 模拟：随机分配一个类型用于演示
+        #     # 实际中你会调用你的分类模型
+        #     cats = ["Attribute", "Object", "Effect", "Unknown", "Artist"]
+        #     # 为了演示一致性，根据字符长度hash一下
+        #     cat = cats[len(clean_tag) % len(cats)]
         
         return str(danbooru_api.get_tag_type(tag_text))
     
@@ -79,7 +80,7 @@ class MockAIInterface:
         # 2. 去除权重 (例如 :1.2 或 :0.5)
         clean_tag = re.sub(r':\d+(\.\d+)?$', '', clean_tag)
         
-        return self.translations.get(clean_tag, "未知")
+        return translate(clean_tag)
 
     def get_color_for_category(self, category):
         """
