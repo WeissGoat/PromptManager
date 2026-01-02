@@ -5,6 +5,8 @@ import re
 import html
 import time
 import shutil
+import json
+from natsort import natsorted
 from datetime import datetime
 # 引入 queue 用于线程安全队列
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -40,7 +42,7 @@ except ImportError:
 
 class MockAIInterface:
     """
-    混合接口：优先使用本地硬编码字典，未命中则使用 Google 翻译
+    混合接口：优先使用本地硬编码字典 -> 本地文件缓存 -> Google 翻译
     """
     def __init__(self):
         if HAS_TRANSLATOR:
@@ -48,24 +50,15 @@ class MockAIInterface:
             self.translator = GoogleTranslator(source='auto', target='zh-CN')
         
         self.runtime_cache = {}
+        
+        # --- 本地字典缓存路径 ---
+        self.cache_file = resolve_path("translation_cache.json")
+        self.persistent_cache = self.load_cache()
 
         self.known_categories = {
-            "1girl": "Character", "solo": "Character", "long hair": "Attribute", 
-            "blue eyes": "Attribute", "dress": "Clothing", "masterpiece": "Quality",
-            "best quality": "Quality", "simple background": "Background", 
-            "white background": "Background", "standing": "Pose", "looking at viewer": "Pose",
-            "monochrome": "Style", "sketch": "Style", "greyscale": "Style"
         }
         
         self.translations = {
-            "1girl": "1个女孩", "solo": "单人", "long hair": "长发", 
-            "blue eyes": "蓝眼", "dress": "连衣裙", "masterpiece": "杰作",
-            "best quality": "最佳质量", "simple background": "简单背景",
-            "white background": "白背景", "standing": "站立", "looking at viewer": "看镜头",
-            "monochrome": "单色", "sketch": "素描", "greyscale": "灰度",
-            "red hair": "红发", "blue dress": "蓝裙子", "forest": "森林",
-            "cyberpunk": "赛博朋克", "mecha": "机甲", "cat ears": "猫耳",
-            "cowboy shot": "七分身", "abs": "腹肌" 
         }
 
         self.category_colors = {} 
@@ -74,36 +67,72 @@ class MockAIInterface:
             "#E0BBE4", "#957DAD", "#D291BC", "#FEC8D8", "#FFDFD3"
         ]
 
-    def classify_tag(self, tag_text):
-        if HAS_REAL_API:
+    def load_cache(self):
+        """加载本地翻译缓存文件"""
+        if os.path.exists(self.cache_file):
             try:
-                return str(danbooru_api.get_tag_type(tag_text))
-            except:
-                pass
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Error loading cache: {e}")
+                return {}
+        return {}
+
+    def save_cache(self):
+        """保存翻译缓存到本地文件"""
+        try:
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.persistent_cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error saving cache: {e}")
+
+    def classify_tag(self, tag_text):
+
 
         clean_tag = re.sub(r'[\(\)\[\]\{\}]', '', tag_text).strip().lower()
         if clean_tag in self.known_categories:
             return self.known_categories[clean_tag]
-        
-        cats = ["Attribute", "Object", "Effect", "Unknown", "Artist"]
-        return cats[len(clean_tag) % len(cats)]
+
+        return str(danbooru_api.get_tag_type(clean_tag))
+    
     
     def translate_tag(self, tag_text):
+        """
+        翻译逻辑升级：
+        1. 清洗文本
+        2. 硬编码字典 (最准)
+        3. 本地文件缓存 (历史积累)
+        4. Google 翻译 (联网获取并保存)
+        """
         clean_tag = re.sub(r'[\(\)\[\]\{\}]', '', tag_text).strip().lower()
         clean_tag = re.sub(r':\d+(\.\d+)?$', '', clean_tag)
 
         if not clean_tag: return ""
 
+        # Level 1: 硬编码字典
         if clean_tag in self.translations:
             return self.translations[clean_tag]
         
+        # Level 2: 本地文件缓存
+        if clean_tag in self.persistent_cache:
+            return self.persistent_cache[clean_tag]
+
+        # Level 3: 运行时缓存 (防止同一次运行重复请求)
         if clean_tag in self.runtime_cache:
             return self.runtime_cache[clean_tag]
 
+        # Level 4: Google 翻译
         if HAS_TRANSLATOR:
             try:
                 result = self.translator.translate(clean_tag)
+                
+                # 写入缓存
                 self.runtime_cache[clean_tag] = result
+                self.persistent_cache[clean_tag] = result
+                
+                # 立即保存到文件 (虽然频繁IO，但标签量不大，保证数据安全)
+                self.save_cache()
+                
                 return result
             except Exception as e:
                 print(f"Trans Error: {e}")
@@ -524,7 +553,7 @@ class FlowLayoutWidget(QWidget):
 class PromptConverterApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AI 提示词转换与筛选工具 (预览 + 极速导入 + 右键分类)")
+        self.setWindowTitle("AI 提示词转换与筛选工具 ")
         self.resize(1300, 800)
 
         self.items = [] 
@@ -742,7 +771,7 @@ class PromptConverterApp(QMainWindow):
             if not path.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')): 
                 continue
             files.append(path)
-        
+        files = natsorted(files)
         if not files: return
         
         self.img_progress.setVisible(True)
@@ -863,8 +892,8 @@ class PromptConverterApp(QMainWindow):
     # --- 右键菜单功能 ---
     def show_tag_context_menu(self, pos, chip, tag_data):
         menu = QMenu(self)
-        
-        known_cats = self.category_filters.keys()
+
+        known_cats = set()
         
         # 2. 添加分类选项
         for cat in sorted(known_cats):
