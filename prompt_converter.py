@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QGridLayout, QStyle, QInputDialog, QMenu)
 from PySide6.QtCore import Qt, Signal, QTimer, QSize, QThread, QObject, QMutex
 from PySide6.QtGui import QColor, QPalette, QFont, QAction
-
+from util import resolve_path, create_shortcut
 # --- Mock Interfaces (模拟接口) ---
 # 实际使用时请保留您的 sys.path 设置
 sys.path.append(r"F:\ThreeState")
@@ -27,6 +27,8 @@ try:
 except ImportError:
     HAS_REAL_API = False
     print("Warning: API modules not found, running in full mock mode.")
+from utils import image
+# --- Mock/Hybrid Interface ---
 
 class MockAIInterface:
     """
@@ -105,7 +107,10 @@ class MockAIInterface:
         base_tags = "masterpiece, best quality, 1girl, solo, looking at viewer"
         random_tags = ["red hair", "blue dress", "forest", "cyberpunk", "mecha", "cat ears"]
         extra = ", ".join(random.sample(random_tags, 3))
-        return f"{base_tags}, {extra}, source_{filename}"
+        # return f"{base_tags}, {extra}, source_{filename}"
+        image_path = resolve_path(image_path)
+        return image.get_ai_image_prompt(image_path,True)
+        
 
 api = MockAIInterface()
 
@@ -654,8 +659,12 @@ class PromptConverterApp(QMainWindow):
     def import_from_images(self):
         folder = QFileDialog.getExistingDirectory(self, "选择图片文件夹")
         if not folder: return
-        
-        files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
+        files = []
+        for f in os.listdir(folder):
+            path = os.path.join(folder, f)
+            path = resolve_path(path)
+            if not image.is_image(path): continue
+            files.append(path)
         if not files: return
         
         # UI Setup
