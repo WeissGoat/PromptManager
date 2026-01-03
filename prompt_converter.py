@@ -35,7 +35,8 @@ except ImportError:
     print("Warning: deep-translator not installed.")
 
 # --- Interface Logic ---
-
+def do_clean_tag(tag_text):
+    return re.sub(r'[\(\)\[\]\{\}]', '', tag_text).strip().lower()
 class MockAIInterface:
     """
     混合接口：优先使用本地硬编码字典 -> 本地文件缓存 -> Google 翻译
@@ -86,11 +87,12 @@ class MockAIInterface:
     def classify_tag(self, tag_text):
 
 
-        clean_tag = re.sub(r'[\(\)\[\]\{\}]', '', tag_text).strip().lower()
+        clean_tag = do_clean_tag(tag_text)
         if clean_tag in self.known_categories:
             return self.known_categories[clean_tag]
 
         return str(tag_classifier.get_tag_type2(clean_tag))
+
     
     
     def translate_tag(self, tag_text):
@@ -149,6 +151,7 @@ class MockAIInterface:
         return image.get_ai_image_prompt(image_path, True)
     
     def on_tag_category_changed(self, tag, cat):
+        tag = do_clean_tag(tag)
         print(f"Tag {tag} changed to {cat}")
         tag_classifier.TagTypeCache.get_instance()[tag] = cat
         
