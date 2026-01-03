@@ -22,12 +22,8 @@ from util import resolve_path, create_shortcut
 # --- API Import Setup ---
 sys.path.append(r"F:\ThreeState")
 
-try:
-    import danbooru_api
-    HAS_REAL_API = True
-except ImportError:
-    HAS_REAL_API = False
-    print("Warning: API modules not found, running in full mock mode.")
+import tag_classifier
+HAS_REAL_API = True
 from utils import image, uai
 
 # --- Translation Import Setup ---
@@ -56,6 +52,7 @@ class MockAIInterface:
         self.persistent_cache = self.load_cache()
 
         self.known_categories = {
+            "loli": "special",
         }
         
         self.translations = {
@@ -93,7 +90,7 @@ class MockAIInterface:
         if clean_tag in self.known_categories:
             return self.known_categories[clean_tag]
 
-        return str(danbooru_api.get_tag_type(clean_tag))
+        return str(tag_classifier.get_tag_type2(clean_tag))
     
     
     def translate_tag(self, tag_text):
@@ -150,6 +147,10 @@ class MockAIInterface:
         # time.sleep(0.1) 
         image_path = resolve_path(image_path)
         return image.get_ai_image_prompt(image_path, True)
+    
+    def on_tag_category_changed(self, tag, cat):
+        print(f"Tag {tag} changed to {cat}")
+        tag_classifier.TagTypeCache.get_instance()[tag] = cat
         
 
 api = MockAIInterface()
@@ -396,7 +397,7 @@ class TagChip(QLabel):
         # 定时器用于区分单击和双击
         self.click_timer = QTimer(self)
         self.click_timer.setSingleShot(True)
-        self.click_timer.setInterval(220) # 延迟220ms以检测双击
+        self.click_timer.setInterval(320) # 延迟220ms以检测双击
         self.click_timer.timeout.connect(self._perform_toggle)
         
         self.update_content()
@@ -893,7 +894,7 @@ class PromptConverterApp(QMainWindow):
     def show_tag_context_menu(self, pos, chip, tag_data):
         menu = QMenu(self)
 
-        known_cats = set()
+        known_cats = self.get_found_cats()
         
         # 2. 添加分类选项
         for cat in sorted(known_cats):
@@ -920,7 +921,7 @@ class PromptConverterApp(QMainWindow):
 
     def change_tag_category(self, tag_data, chip, new_category):
         tag_data['category'] = new_category
-        
+        api.on_tag_category_changed(tag_data['text'], new_category)
         # 更新颜色
         color = api.get_color_for_category(new_category)
         
@@ -1098,13 +1099,16 @@ class PromptConverterApp(QMainWindow):
 
         self.lbl_warning.setText(f"⚠️ {first_error_msg}" if first_error_msg else "")
 
-    def update_filters(self):
+    def get_found_cats(self):
         found_cats = set()
         for item in self.items:
             for tag in item.parsed_tags:
                 cat = tag.get('category', 'Unknown')
                 if cat != 'Pending': found_cats.add(cat)
-        
+        return found_cats
+
+    def update_filters(self):
+        found_cats = self.get_found_cats()
         while self.filter_layout.count():
             w = self.filter_layout.takeAt(0).widget()
             if w: w.deleteLater()
