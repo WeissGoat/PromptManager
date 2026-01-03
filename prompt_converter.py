@@ -923,15 +923,29 @@ class PromptConverterApp(QMainWindow):
         menu.exec(chip.mapToGlobal(pos))
 
     def change_tag_category(self, tag_data, chip, new_category):
-        tag_data['category'] = new_category
-        api.on_tag_category_changed(tag_data['text'], new_category)
-        # 更新颜色
+        target_text = tag_data['text']
+        
+        # 1. 全局 API 记录
+        api.on_tag_category_changed(target_text, new_category)
+        
+        # 2. 遍历所有项目，更新相同文本的 Tag 分类 (全局更新)
+        for item in self.items:
+            for t in item.parsed_tags:
+                if t['text'] == target_text:
+                    t['category'] = new_category
+        
+        # 3. 刷新当前界面的显示 (如果当前界面含有该 Tag，更新其 Chip)
         color = api.get_color_for_category(new_category)
+        if self.current_item_index >= 0:
+            current_item = self.items[self.current_item_index]
+            for i, t in enumerate(current_item.parsed_tags):
+                if t['text'] == target_text:
+                    # 更新当前界面上对应的 Chip
+                    if i < len(self.flow_widget.chips):
+                        target_chip = self.flow_widget.chips[i]
+                        target_chip.update_data(t['translation'], new_category, color)
         
-        # 更新 UI
-        chip.update_data(tag_data['translation'], new_category, color)
-        
-        # 更新筛选列表（如果这是个新分类）
+        # 4. 更新筛选列表
         if new_category not in self.category_filters:
             self.update_filters()
             
