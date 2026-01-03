@@ -1125,12 +1125,25 @@ class PromptConverterApp(QMainWindow):
                 self.category_filters[cat] = True
 
     def on_filter_change(self, category, state):
-        is_checked = (state == Qt.Checked)
-        self.category_filters[category] = is_checked
+        # 1. 修复状态判断 (state 是 int, 0=Unchecked, 2=Checked)
+        is_filter_on = (state != 0)
+        self.category_filters[category] = is_filter_on
+        
         if self.current_item_index >= 0:
-            for chip in self.flow_widget.chips:
+            item = self.items[self.current_item_index]
+            
+            # 2. 遍历当前显示的 Chip，结合“过滤器状态”和“用户手动状态”来决定最终状态
+            # 注意：chips 和 item.parsed_tags 是一一对应的顺序
+            for i, chip in enumerate(self.flow_widget.chips):
                 if chip.category == category:
-                    chip.set_active_by_filter(is_checked)
+                    # 获取该 Tag 用户是否手动启用了它 (默认为 True)
+                    user_enabled = item.parsed_tags[i].get('enabled', True)
+                    
+                    # 只有当 [过滤器开启] 且 [用户未手动禁用] 时，Tag 才显示为激活
+                    should_be_active = is_filter_on and user_enabled
+                    
+                    chip.set_active_by_filter(should_be_active)
+            
             self.check_global_brackets(self.items[self.current_item_index])
 
     def show_item_context_menu(self, pos):
