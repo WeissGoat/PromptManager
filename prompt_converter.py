@@ -1241,7 +1241,20 @@ class PromptConverterApp(QMainWindow):
         current_idx = 1
 
         for item in self.items:
-            valid_tags = [t['text'] for t in item.parsed_tags if t.get('enabled', True)]
+            valid_tags = []
+            for t in item.parsed_tags:
+                # 1. 检查用户是否手动禁用
+                if not t.get('enabled', True):
+                    continue
+                
+                # 2. 检查全局分类筛选器是否禁用
+                cat = t.get('category', 'Unknown')
+                # Pending 状态通常不参与筛选（或者默认为开启），其他分类需检查 filters
+                if cat != 'Pending' and not self.category_filters.get(cat, True):
+                    continue
+                
+                valid_tags.append(t['text'])
+
             if not valid_tags: continue
             
             prompt_content = ", ".join(valid_tags)
