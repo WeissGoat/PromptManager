@@ -22,8 +22,13 @@ from util import resolve_path, create_shortcut
 # --- API Import Setup ---
 sys.path.append(r"F:\ThreeState")
 
-import tag_classifier
-HAS_REAL_API = True
+try:
+    import tag_classifier
+    HAS_REAL_API = True
+except ImportError:
+    HAS_REAL_API = False
+    print("Warning: tag_classifier module not found.")
+
 from utils import image, uai
 
 # --- Translation Import Setup ---
@@ -37,6 +42,7 @@ except ImportError:
 # --- Interface Logic ---
 def do_clean_tag(tag_text):
     return re.sub(r'[\(\)\[\]\{\}]', '', tag_text).strip().lower()
+
 class MockAIInterface:
     """
     混合接口：优先使用本地硬编码字典 -> 本地文件缓存 -> Google 翻译
@@ -85,15 +91,18 @@ class MockAIInterface:
             print(f"Error saving cache: {e}")
 
     def classify_tag(self, tag_text):
-
-
         clean_tag = do_clean_tag(tag_text)
         if clean_tag in self.known_categories:
             return self.known_categories[clean_tag]
 
-        return str(tag_classifier.get_tag_type2(clean_tag))
-
-    
+        if HAS_REAL_API:
+            try:
+                return str(tag_classifier.get_tag_type2(clean_tag))
+            except:
+                pass
+        
+        cats = ["Attribute", "Object", "Effect", "Unknown", "Artist"]
+        return cats[len(clean_tag) % len(cats)]
     
     def translate_tag(self, tag_text):
         """
@@ -145,16 +154,27 @@ class MockAIInterface:
             self.category_colors[category] = color
         return self.category_colors[category]
 
+    def get_all_categories(self):
+        return self.category_colors.keys()
+    
     def image_to_prompt(self, image_path):
         # time.sleep(0.1) 
         image_path = resolve_path(image_path)
         return image.get_ai_image_prompt(image_path, True)
     
     def on_tag_category_changed(self, tag, cat):
-        tag = do_clean_tag(tag)
-        print(f"Tag {tag} changed to {cat}")
-        tag_classifier.TagTypeCache.get_instance()[tag] = cat
+        tag_clean = do_clean_tag(tag)
+        print(f"Tag {tag_clean} changed to {cat}")
         
+        # 更新本地内存字典
+        self.known_categories[tag_clean] = cat
+        
+        # 如果有真实API，尝试更新其缓存
+        if HAS_REAL_API:
+            try:
+                tag_classifier.TagTypeCache.get_instance()[tag_clean] = cat
+            except Exception:
+                pass
 
 api = MockAIInterface()
 
@@ -340,8 +360,9 @@ class GlobalTranslationWorker(QThread):
                     self.tag_processed.emit(target_item, i, trans, cat)
                     processed_something = True
                     
-                    if not HAS_TRANSLATOR:
-                        QThread.msleep(5)
+                    # 关键修改：无论是否使用翻译API，都强制休眠一小段时间
+                    # 避免本地缓存命中时产生“信号风暴”卡死UI线程
+                    QThread.msleep(5) 
 
             self.mutex.lock()
             # 检查是否全部完成 (既有翻译，分类也不是 Pending)
@@ -400,7 +421,7 @@ class TagChip(QLabel):
         # 定时器用于区分单击和双击
         self.click_timer = QTimer(self)
         self.click_timer.setSingleShot(True)
-        self.click_timer.setInterval(320) # 延迟220ms以检测双击
+        self.click_timer.setInterval(320) # 延迟320ms以检测双击
         self.click_timer.timeout.connect(self._perform_toggle)
         
         self.update_content()
@@ -557,7 +578,7 @@ class FlowLayoutWidget(QWidget):
 class PromptConverterApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AI 提示词转换与筛选工具 ")
+        self.setWindowTitle("AI 提示词转换与筛选工具")
         self.resize(1300, 800)
 
         self.items = [] 
@@ -878,10 +899,10 @@ class PromptConverterApp(QMainWindow):
             chip.customContextMenuRequested.connect(lambda pos, c=chip, td=tag_data: self.show_tag_context_menu(pos, c, td))
             # ------------------
             
-            is_enabled = tag_data.get('enabled', True)
-            if not self.category_filters.get(cat, True) and cat != 'Pending':
-                 is_enabled = False
-            chip.is_active = is_enabled
+            # 使用 update_filters 的逻辑来判断是否显示
+            is_filter_active = self.category_filters.get(cat, True)
+            user_enabled = tag_data.get('enabled', True)
+            chip.is_active = is_filter_active and user_enabled
             chip.update_style()
             
             chip.toggled.connect(lambda active, td=tag_data: self.on_chip_toggled(td, active))
@@ -896,7 +917,8 @@ class PromptConverterApp(QMainWindow):
     # --- 右键菜单功能 ---
     def show_tag_context_menu(self, pos, chip, tag_data):
         menu = QMenu(self)
-
+        
+        # 1. 收集所有已知分类 (从 API 预设和当前筛选器中合并)
         known_cats = self.get_found_cats()
         
         # 2. 添加分类选项
@@ -1117,6 +1139,7 @@ class PromptConverterApp(QMainWindow):
         self.lbl_warning.setText(f"⚠️ {first_error_msg}" if first_error_msg else "")
 
     def get_found_cats(self):
+        return api.get_all_categories()
         found_cats = set()
         for item in self.items:
             for tag in item.parsed_tags:
@@ -1150,10 +1173,8 @@ class PromptConverterApp(QMainWindow):
             item = self.items[self.current_item_index]
             
             # 2. 遍历当前显示的 Chip，结合“过滤器状态”和“用户手动状态”来决定最终状态
-            # 注意：chips 和 item.parsed_tags 是一一对应的顺序
             for i, chip in enumerate(self.flow_widget.chips):
                 if chip.category == category:
-                    # 获取该 Tag 用户是否手动启用了它 (默认为 True)
                     user_enabled = item.parsed_tags[i].get('enabled', True)
                     
                     # 只有当 [过滤器开启] 且 [用户未手动禁用] 时，Tag 才显示为激活
