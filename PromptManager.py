@@ -3,12 +3,10 @@ import os
 import shutil
 import re
 import subprocess
-import glob
 import tempfile
 import html
 import json
 import traceback
-import random 
 from pathlib import Path
 
 # PySide6 Imports
@@ -39,34 +37,7 @@ except ImportError:
 def get_ori_prompt(prompt):
     return prompt.split('\n=')[0]
 
-def resolve_path(path):
-    """
-    If path is a .lnk file, resolve to its target.
-    Otherwise return path as is.
-    """
-    path_obj = Path(path)
-    if path_obj.suffix.lower() == '.lnk' and shell:
-        try:
-            shortcut = shell.CreateShortcut(str(path_obj.resolve()))
-            target = shortcut.TargetPath
-            if os.path.exists(target):
-                return target
-        except Exception as e:
-            print(f"Error resolving lnk {path}: {e}")
-    return str(path)
-
-def create_shortcut(target_path, link_path):
-    """Creates a Windows shortcut (.lnk)."""
-    if not shell:
-        return False
-    try:
-        shortcut = shell.CreateShortcut(link_path)
-        shortcut.TargetPath = target_path
-        shortcut.Save()
-        return True
-    except Exception as e:
-        print(f"Error creating shortcut: {e}")
-        return False
+from util import resolve_path, create_shortcut
 
 def reset_ext_node_type(txt, key, param):
     data = txt.split('\n')
@@ -1536,7 +1507,7 @@ class PromptManagerApp(QMainWindow):
         
         confirm = QMessageBox.question(self, "确认删除", f"确定要将这 {len(items)} 个节点移至回收站吗?", QMessageBox.Yes | QMessageBox.No)
         if confirm == QMessageBox.Yes:
-            bakup_path = os.path.join(self.current_scene_path, "stash")
+            bakup_path = os.path.join(self.current_scene_path, "add")
             os.makedirs(bakup_path, exist_ok=True)
             for item in items:
                 path = item.data(Qt.UserRole) # Use direct path (lnk or folder)
