@@ -333,10 +333,12 @@ class RunParamsDialog(QDialog):
                         row = self.table.rowCount()
                         self.table.insertRow(row)
                         val_str = ""
+                        key_str = ""
                         is_enabled = True
                         if isinstance(v, dict) and 'value' in v:
                             val_str = str(v['value'])
                             is_enabled = v.get('enabled', True)
+                            key_str = str(v['key'])
                         else:
                             val_str = str(v)
                             is_enabled = True
@@ -344,7 +346,7 @@ class RunParamsDialog(QDialog):
                         check_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
                         check_item.setCheckState(Qt.Checked if is_enabled else Qt.Unchecked)
                         self.table.setItem(row, 0, check_item)
-                        self.table.setItem(row, 1, QTableWidgetItem(str(k)))
+                        self.table.setItem(row, 1, QTableWidgetItem(key_str))
                         self.table.setItem(row, 2, QTableWidgetItem(val_str))
             except Exception as e:
                 print(f"Error loading params: {e}")
@@ -359,7 +361,7 @@ class RunParamsDialog(QDialog):
                 key = key_item.text().strip()
                 val = val_item.text().strip()
                 enabled = (check_item.checkState() == Qt.Checked)
-                data[key] = {"value": val, "enabled": enabled}
+                data[i] = {"key": key, "value": val, "enabled": enabled}
         self.params_data = data
         try:
             with open(self.params_file, 'w', encoding='utf-8') as f:
@@ -376,7 +378,7 @@ class RunParamsDialog(QDialog):
         for k, v in self.params_data.items():
             if isinstance(v, dict) and 'value' in v:
                 if v.get('enabled', True):
-                    params_list.append(f"--{k}#{v['value']}")
+                    params_list.append(f"--{v['key']}#{v['value']}")
             else:
                 params_list.append(f"--{k}#{v}")
         return params_list
@@ -1400,7 +1402,7 @@ class PromptManagerApp(QMainWindow):
             # 3. Construct Command
             # Command structure: script.bat "path1" "path2" "key=val" "key2=val2"
             cmd = [self.bat_script_path] + paths + extra_params
-            print(f"Running command: {'  '.join(cmd)}")
+            print(f"Running command: {cmd}")
             try:
                 # Windows specific flag to open a new console window
                 creation_flags = 0
