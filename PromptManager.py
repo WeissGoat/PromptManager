@@ -1431,6 +1431,10 @@ class PromptManagerApp(QMainWindow):
         bookmark_act.triggered.connect(lambda: self.toggle_bookmark(item, name))
         menu.addAction(bookmark_act)
         
+        rename_act = QAction("重命名 (Rename)", self)
+        rename_act.triggered.connect(lambda: self.rename_scene(item))
+        menu.addAction(rename_act)
+        
         menu.addSeparator()
         
         open_act = QAction("在资源管理器中打开", self)
@@ -1488,6 +1492,62 @@ class PromptManagerApp(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to execute:\n{e}")
 
+    def rename_scene(self, item):
+        old_path = item.data(0, Qt.UserRole)
+        if not old_path or not os.path.exists(old_path): return
+        
+        old_name = os.path.basename(old_path)
+        new_name, ok = QInputDialog.getText(self, "重命名场景", "新名称:", text=old_name)
+        if ok and new_name and new_name != old_name:
+            new_path = os.path.join(os.path.dirname(old_path), new_name)
+            try:
+                os.rename(old_path, new_path)
+                item.setData(0, Qt.UserRole, new_path)
+                
+                # Update bookmarks if necessary
+                if old_name in self.bookmarks:
+                    self.bookmarks.remove(old_name)
+                    self.bookmarks.add(new_name)
+                    self.save_bookmarks()
+                
+                # Refresh UI text and style
+                self.update_scene_item_style(item, new_name)
+                
+                # Update current selection reference if needed
+                if self.current_scene_path == old_path:
+                    self.current_scene_path = new_path
+                    
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"重命名失败: {e}")
+
+    def rename_node(self, item):
+        old_full_path = item.data(Qt.UserRole)
+        if not old_full_path or not os.path.exists(old_full_path): return
+        
+        old_name = os.path.basename(old_full_path)
+        
+        # Show name in dialog
+        new_name, ok = QInputDialog.getText(self, "重命名节点", "新名称:", text=old_name)
+        if ok and new_name and new_name != old_name:
+            new_full_path = os.path.join(os.path.dirname(old_full_path), new_name)
+            
+            # Handle extension for lnk if user accidentally removed it?
+            if old_full_path.lower().endswith('.lnk') and not new_name.lower().endswith('.lnk'):
+                new_full_path += ".lnk"
+                new_name += ".lnk"
+
+            try:
+                os.rename(old_full_path, new_full_path)
+                item.setText(new_name)
+                item.setData(Qt.UserRole, new_full_path)
+                
+                if self.current_node_path == old_full_path:
+                    self.current_node_path = new_full_path
+                
+                self.update_list_diff_for_current_item()
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"重命名失败: {e}")
 
     def toggle_bookmark(self, item, name):
         if name in self.bookmarks:
@@ -1510,6 +1570,10 @@ class PromptManagerApp(QMainWindow):
         open_act = QAction("在资源管理器中打开", self)
         open_act.triggered.connect(lambda: os.startfile(resolved_path))
         menu.addAction(open_act)
+        
+        rename_act = QAction("重命名 (Rename)", self)
+        rename_act.triggered.connect(lambda: self.rename_node(item))
+        menu.addAction(rename_act)
         
         menu.addSeparator()
         
