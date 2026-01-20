@@ -1437,7 +1437,57 @@ class PromptManagerApp(QMainWindow):
         open_act.triggered.connect(lambda: os.startfile(path))
         menu.addAction(open_act)
         
+        menu.addSeparator()
+        
+        # --- SEND TO MENU ---
+        sendto_menu = menu.addMenu("发送到 (Send to)")
+        self.populate_sendto_menu(sendto_menu, path)
+        
+        
+
         menu.exec(self.scene_tree.mapToGlobal(pos))
+
+    def populate_sendto_menu(self, menu, source_path):
+        sendto_dir = os.path.join(os.getenv('APPDATA'), 'Microsoft', 'Windows', 'SendTo')
+        if not os.path.exists(sendto_dir):
+            menu.addAction("SendTo folder not found").setEnabled(False)
+            return
+
+        items_found = False
+        for name in os.listdir(sendto_dir):
+            if name.lower() == 'desktop (create shortcut).desklink': continue 
+            
+            full_path = os.path.join(sendto_dir, name)
+            if os.path.isfile(full_path):
+                display_name = os.path.splitext(name)[0]
+                action = QAction(display_name, self)
+                # Use closure to capture path
+                action.triggered.connect(lambda checked, t=full_path, s=source_path: self.execute_sendto(t, s))
+                menu.addAction(action)
+                items_found = True
+        
+        if not items_found:
+            menu.addAction("No items in SendTo").setEnabled(False)
+
+    def execute_sendto(self, target_shortcut, source_path):
+        # Resolve target executable
+        real_target = target_shortcut
+        if target_shortcut.lower().endswith('.lnk') and shell:
+            try:
+                shortcut = shell.CreateShortcut(target_shortcut)
+                real_target = shortcut.TargetPath
+            except Exception as e:
+                print(f"Error resolving shortcut: {e}")
+        
+        try:
+            creation_flags = 0
+            if sys.platform == "win32":
+                creation_flags = subprocess.CREATE_NEW_CONSOLE
+                
+            subprocess.Popen([real_target, source_path], creationflags=creation_flags, cwd=os.path.dirname(real_target))
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to execute:\n{e}")
+
 
     def toggle_bookmark(self, item, name):
         if name in self.bookmarks:
