@@ -1404,12 +1404,17 @@ class PromptManagerApp(QMainWindow):
             cmd = [self.bat_script_path] + paths + extra_params
             print(f"Running command: {cmd}")
             try:
-                # Windows specific flag to open a new console window
-                creation_flags = 0
+                # Use 'start' to decouple process execution
                 if sys.platform == "win32":
-                    creation_flags = subprocess.CREATE_NEW_CONSOLE
-                
-                subprocess.Popen(cmd, cwd=os.path.dirname(self.bat_script_path), creationflags=creation_flags)
+                    cmd_str = subprocess.list2cmdline(cmd)
+                    # /c start "Title" command_string
+                    subprocess.Popen(f'start "PromptManager Run" {cmd_str}', 
+                                   cwd=os.path.dirname(self.bat_script_path), 
+                                   shell=True)
+                else:
+                    # Unix fallback
+                    subprocess.Popen(cmd, cwd=os.path.dirname(self.bat_script_path))
+                    
             except Exception as e:
                 QMessageBox.critical(self, "Run Error", f"执行脚本失败:\n{e}")
 
