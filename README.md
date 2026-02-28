@@ -80,17 +80,21 @@ cd PromptManager
 
 ### 2. 安装依赖
 
-使用 pip:
+**推荐使用 [uv](https://github.com/astral-sh/uv)（快速且现代）:**
 
 ```bash
-pip install -r requirements.txt
+# 安装 uv（如果尚未安装）
+# Windows (PowerShell)
+irm https://astral.sh/uv/install.ps1 | iex
+
+# macOS/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 使用 uv 安装依赖并运行
+uv sync
+uv run python PromptManager.py
 ```
 
-或使用项目配置文件:
-
-```bash
-pip install -e .
-```
 
 ### 3. 配置路径（可选）
 
@@ -107,6 +111,14 @@ self.bat_script_path = r"C:\Users\...\script.bat"
 如果不修改，程序启动时会提示选择根目录。
 
 ### 4. 运行应用
+
+**使用 uv:**
+
+```bash
+uv run python PromptManager.py
+```
+
+**或直接运行:**
 
 ```bash
 python PromptManager.py
