@@ -1052,6 +1052,9 @@ class PromptConverterApp(QMainWindow):
         self.register_thread(worker)
 
     def on_single_tag_result(self, tag_data, chip_widget, translation, category):
+        # 核心修复：更新 Chip 控件显示的文本，否则 update_content 还是用的旧文本
+        chip_widget.full_text = tag_data['text']
+        
         tag_data['translation'] = translation
         tag_data['category'] = category
         color = api.get_color_for_category(category)
