@@ -314,10 +314,6 @@ pip install pywin32
 
 本项目采用 MIT 许可证。
 
-## 🙏 致谢
-
-- [PySide6](https://www.qt.io/qt-for-python) - Qt for Python
-- [pywin32](https://github.com/mhammond/pywin32) - Windows API 支持
 
 ## 📧 联系方式
 
