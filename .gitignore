@@ -8,3 +8,23 @@ wheels/
 
 # Virtual environments
 .venv
+
+# User data files (runtime generated)
+bookmarks.json
+run_params.json
+translation_cache.json
+
+# Test files
+test.py
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+novelai
