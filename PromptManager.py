@@ -487,6 +487,27 @@ class PromptManagerApp(QMainWindow):
         left_label = QLabel("场景列表 (Scenes)")
         left_label.setStyleSheet("font-weight: bold; padding: 5px;")
         
+        # Global Search Bar
+        self.global_search_bar = QWidget()
+        gs_layout = QHBoxLayout(self.global_search_bar)
+        gs_layout.setContentsMargins(2, 2, 2, 2)
+        
+        self.global_search_input = QLineEdit()
+        self.global_search_input.setPlaceholderText("🔍 搜索场景/节点... (Ctrl+Shift+F)")
+        self.global_search_input.setClearButtonEnabled(True)
+        self.global_search_input.setStyleSheet(
+            "QLineEdit { padding: 4px 8px; border: 1px solid #555; border-radius: 4px; "
+            "background-color: #363636; color: #eee; }"
+            "QLineEdit:focus { border-color: #4CAF50; }"
+        )
+        self.global_search_input.textChanged.connect(self.on_global_search_changed)
+        
+        gs_layout.addWidget(self.global_search_input)
+        
+        # Global search shortcut
+        self.global_search_shortcut = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
+        self.global_search_shortcut.activated.connect(self.focus_global_search)
+        
         self.scene_tree = QTreeWidget()
         self.scene_tree.setHeaderHidden(True)
         self.scene_tree.setDragEnabled(True)
@@ -500,6 +521,7 @@ class PromptManagerApp(QMainWindow):
         self.scene_tree.dropEvent = self.tree_drop_event
 
         left_layout.addWidget(left_label)
+        left_layout.addWidget(self.global_search_bar)
         left_layout.addWidget(self.scene_tree)
         
         # --- Middle: Action Nodes ---
@@ -648,6 +670,75 @@ class PromptManagerApp(QMainWindow):
         
         # Set initial sizes
         splitter.setSizes([200, 250, 450])
+
+    # --- Global Search Logic ---
+
+    def focus_global_search(self):
+        """Focus the global search input (Ctrl+Shift+F)"""
+        self.global_search_input.setFocus()
+        self.global_search_input.selectAll()
+
+    def on_global_search_changed(self, text):
+        """Filter scenes and nodes based on global search keyword"""
+        keyword = text.strip().lower()
+        
+        if not keyword:
+            # Show all scenes, clear node highlights
+            for i in range(self.scene_tree.topLevelItemCount()):
+                item = self.scene_tree.topLevelItem(i)
+                item.setHidden(False)
+            self._clear_node_search_highlight()
+            return
+        
+        # Search across all scenes and their nodes
+        for i in range(self.scene_tree.topLevelItemCount()):
+            item = self.scene_tree.topLevelItem(i)
+            scene_path = item.data(0, Qt.UserRole)
+            scene_name = os.path.basename(scene_path).lower()
+            
+            scene_name_match = keyword in scene_name
+            
+            # Check if any child node in this scene matches
+            node_match = False
+            if scene_path and os.path.isdir(scene_path):
+                try:
+                    with os.scandir(scene_path) as it:
+                        for entry in it:
+                            entry_name = entry.name.lower()
+                            # Remove ordering prefix for matching
+                            clean_name = clean_node_name(entry_name)
+                            if keyword in entry_name or keyword in clean_name:
+                                node_match = True
+                                break
+                except OSError:
+                    pass
+            
+            # Show scene if its name matches or it contains matching nodes
+            item.setHidden(not (scene_name_match or node_match))
+        
+        # If a scene is currently selected, highlight matching nodes in the node list
+        self._highlight_matching_nodes(keyword)
+    
+    def _highlight_matching_nodes(self, keyword):
+        """Highlight nodes in the current node list that match the search keyword"""
+        for i in range(self.node_list.count()):
+            item = self.node_list.item(i)
+            name = item.text().lower()
+            clean_name = clean_node_name(name)
+            
+            if keyword and (keyword in name or keyword in clean_name):
+                item.setBackground(QColor("#2E5C2E"))  # Dark green highlight
+                item.setForeground(QColor("#AAFFAA"))  # Light green text
+            else:
+                item.setBackground(QBrush(Qt.NoBrush))  # Reset
+                item.setForeground(QBrush(Qt.NoBrush))  # Reset
+    
+    def _clear_node_search_highlight(self):
+        """Remove all search highlights from node list"""
+        for i in range(self.node_list.count()):
+            item = self.node_list.item(i)
+            item.setBackground(QBrush(Qt.NoBrush))
+            item.setForeground(QBrush(Qt.NoBrush))
 
     # --- Search Logic ---
     
@@ -804,6 +895,11 @@ class PromptManagerApp(QMainWindow):
         
         self.node_list.setCurrentRow(idx)
         self.on_node_selected(self.node_list.item(idx))
+        
+        # Re-apply node search highlight if global search is active
+        keyword = self.global_search_input.text().strip().lower()
+        if keyword:
+            self._highlight_matching_nodes(keyword)
 
     def load_nodes_for_scene(self, scene_path):
         self.node_list.clear()
